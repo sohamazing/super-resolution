@@ -1,0 +1,24 @@
+# Ignore datasets
+data/
+div2K-flickr2K-data/
+data_mount/
+
+# Ignore large model checkpoint files
+*.pth
+
+# Ignore Python cache and environment files
+__pycache__/
+*.pyc
+.env
+
+# Ignore macOS specific files
+.DS_Store
+
+# Ignore secret credential files
+*.json
+
+# Ignore Weights & Biases local logs
+wandb/
+
+# Ignore legacy files
+legacy/

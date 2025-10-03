@@ -1,0 +1,107 @@
+Of course. Here is a revised version of the paper. It's condensed to focus on the advanced architectural and training decisions we made, assuming the reader is already familiar with fundamental deep learning concepts like CNNs, loss functions, and dataset splits.
+
+---
+## Building a State-of-the-Art Photorealistic Super-Resolution Model from Scratch
+
+**Author:** Soham Mukherjee
+**Date:** October 2, 2025
+
+### Abstract
+This paper documents the end-to-end process of designing, building, and training a high-performance, photorealistic 4x image super-resolution model from scratch using PyTorch. The project draws heavy inspiration from the state-of-the-art Real-ESRGAN architecture, focusing on a hands-on implementation to explore the core concepts of modern generative models. We detail the complete workflow, including the crucial decisions made in data curation, the design of a robust data processing pipeline, the implementation of a deep generator and discriminator, and the development of a professional training strategy incorporating advanced loss functions, experiment tracking, and checkpointing.
+
+---
+### 1. Introduction
+
+The primary objective of this project was to build and train a 4x photorealistic Single Image Super-Resolution (SISR) model from scratch. We chose 4x magnification as it represents a challenging benchmark where the perceptual quality improvements of a Generative Adversarial Network (GAN) over traditional distortion-metric-optimized models (like those trained on simple L2 loss) are most apparent. The "from scratch" philosophy was adopted to gain a fundamental understanding of the data pipeline, model architecture, and complex training dynamics of modern GANs.
+
+---
+### 2. Environment and Data Pipeline
+
+The project was developed in a Conda environment using PyTorch, leveraging the MPS backend on an Apple M4 Max for local development and testing.
+
+#### 2.1. Data Curation and Preparation (`create_patches.py`)
+For reproducible benchmarking, we chose to train on a combination of the **DIV2K** and **Flickr2K** datasets, comprising over 3,400 high-resolution images. The official `DIV2K_valid_HR` set was reserved as a final, held-out test set.
+
+The `create_patches.py` script was engineered for robustness and performance:
+* **Multi-Format Ingestion:** A `read_image` function inspects file extensions to correctly process a wide variety of formats, using `rawpy` for camera RAW files (`.ARW`, `.CR2`) and `imageio` (with `pillow-heif`) for standard formats like `.JPG`, `.PNG`, and `.HEIC`.
+* **Patching:** Source images were processed into `256x256` HR patches and corresponding `64x64` LR patches. This data amplification technique is critical for generating a sufficiently large dataset for the deep network architecture.
+* **Parallel Processing:** To accelerate the CPU-bound patching process, we utilized Python's `concurrent.futures.ProcessPoolExecutor`, which dramatically reduced data preparation time from hours to minutes by leveraging all available CPU cores.
+
+---
+### 3. Model Architecture
+
+We implemented a Generator-Discriminator architecture inspired by Real-ESRGAN, with modern enhancements for stability and performance.
+
+#### 3.1. The Generator (`generator.py`)
+The generator is a deep network designed for complex feature extraction and learnable upsampling. It consists of **16,919,555** trainable parameters.
+
+* **Core Component (RRDB):** The body of the network is composed of 23 **Residual-in-Residual Dense Blocks (RRDBs)**. This architecture facilitates the training of a very deep network through extensive feature reuse (dense connections) and improved gradient flow (multi-level residual connections), which is essential for learning the hierarchical features needed for realistic texture synthesis.
+* **Upsampling (`PixelShuffle`):** We chose `nn.PixelShuffle` for the two 2x upsampling stages. This technique avoids the checkerboard artifacts common with transposed convolutions by learning a large number of channels which are then rearranged into the spatial dimensions, providing a more efficient and higher-quality upscaling mechanism.
+
+The detailed parameter breakdown is as follows:
+
+| Component | Layer Details | Parameters |
+| :--- | :--- | :--- |
+| **ResidualDenseBlock** | (Takes 64 channels in, 32 growth) | |
+| | `conv1`: `(3×3×64 + 1) × 32` | 18,464 |
+| | `conv2`: `(3×3×96 + 1) × 32` | 27,680 |
+| | `conv3`: `(3×3×128 + 1) × 32` | 36,896 |
+| | `conv4`: `(3×3×160 + 1) × 32` | 46,112 |
+| | `conv5`: `(3×3×192 + 1) × 64` | 110,656 |
+| | **Subtotal** | **239,808** |
+| **RRDB** | `3 × ResidualDenseBlock` | **719,424** |
+| **GeneratorRRDB** | (Main assembly) | |
+| | `conv_first`: `(3×3×3 + 1) × 64` | 1,792 |
+| | `body`: `23 × RRDB` | 16,546,752 |
+| | `conv_body`: `(3×3×64 + 1) × 64` | 36,928 |
+| | `upsample (x2)`: `2 × [(3×3×64+1)×(64×4)]`| 295,424 |
+| | `conv_hr`: `(3×3×64 + 1) × 64` | 36,928 |
+| | `conv_last`: `(3×3×64 + 1) × 3` | 1,731 |
+| **Total** | | **16,919,555** |
+
+#### 3.2. The Discriminator (`discriminator.py`)
+The discriminator is a deep, VGG-style patch classifier with **5,211,713** trainable parameters. Its role is to provide a realism signal to the generator.
+
+* **Architectural Choice:** The network progressively downsamples the input image through a series of convolutional blocks, distilling a high-resolution image patch into a single "realness" score.
+* **Stabilization (Spectral Normalization):** A key professional upgrade was the application of `spectral_norm` to every convolutional layer. This enforces the 1-Lipschitz constraint on the discriminator, which is a crucial technique for preventing the discriminator's gradients from exploding and for stabilizing the overall adversarial training dynamic.
+
+The detailed parameter breakdown is as follows:
+
+| Component | Layer Details | Parameters |
+| :--- | :--- | :--- |
+| **Features Block**| (Progressive downsampling) | |
+| | `conv_block(3, 64)` | 1,792 |
+| | `conv_block(64, 64, s=2)` | 36,928 |
+| | `conv_block(64, 128)` | 73,856 |
+| | `conv_block(128, 128, s=2)` | 147,584 |
+| | `conv_block(128, 256)` | 295,168 |
+| | `conv_block(256, 256, s=2)`| 590,080 |
+| | `conv_block(256, 512)` | 1,180,160 |
+| | `conv_block(512, 512, s=2)`| 2,359,808 |
+| **Classifier Block** | (Final prediction) | |
+| | `conv(512, 1024, 1)` | 525,312 |
+| | `conv(1024, 1, 1)` | 1,025 |
+| **Total** | | **5,211,713** |
+
+---
+### 4. The Training Pipeline (`train.py`)
+The `train.py` script orchestrates the complex training process, incorporating a two-phase strategy and a multi-component loss function to achieve photorealistic results.
+
+#### 4.1. The Two-Phase Training Strategy
+* **Phase 1: Generator Pre-training:** To ensure training stability, we first "warm up" the generator by training it for 20 epochs using only a pixel-wise **L1 Loss**. This provides a stable starting point, teaching the generator to produce structurally correct (though blurry) images before introducing the instability of a discriminator.
+* **Phase 2: Adversarial Training:** After the warmup, the main GAN training begins. The generator and discriminator are trained in an alternating fashion, with the generator's goal now being a weighted combination of pixel accuracy, perceptual similarity, and its ability to fool the discriminator.
+
+#### 4.2. The Multi-Component Loss Function
+The key to photorealism is the sophisticated combination of three loss functions:
+* **L1 "Content" Loss:** An L1 distance acts as an "anchor to reality," ensuring the overall structure and colors of the upscaled image remain faithful to the original.
+* **Adversarial Loss:** This is the feedback from the discriminator. It pushes the generator to create sharp, convincing textures that the discriminator believes are real, moving beyond the blurry averages produced by L1 loss alone.
+* **Perceptual "VGG" Loss:** This advanced loss uses a pre-trained VGG19 network to compare the high-level feature maps of the generated and real images. This ensures the output has a similar style and perceptual feel, preventing the generator from creating textures that are sharp but look unnatural or "plasticky."
+
+#### 4.3. Professional Training Practices
+* **Experiment Tracking (`wandb`):** We integrated Weights & Biases from the start for real-time monitoring of all loss components and for visually inspecting sample image outputs, which is crucial for judging perceptual quality.
+* **Learning Rate Scheduling (`CosineAnnealingLR`):** We implemented a scheduler to gradually and smoothly decrease the learning rate over the 2000-epoch training run, allowing the model to make large progress at the beginning and then take smaller, finer steps to settle into a deep and stable minimum.
+* **Checkpointing and Resuming:** For a multi-day training job, the ability to resume is critical. The script saves the full state of the generator, discriminator, and their optimizers every 10 epochs. We added command-line arguments (`--resume_epoch`) to seamlessly load these checkpoints and continue training.
+
+---
+### 5. Conclusion
+This project successfully documents the journey of building a complex, state-of-the-art super-resolution model from first principles. By making deliberate, professional choices at each step—from curating a benchmark dataset and building a parallelized data pipeline to implementing an advanced GAN architecture and a robust training loop—we created a powerful tool for photorealistic image upscaling. The resulting workflow is modular, reproducible, and serves as a comprehensive educational guide to modern generative AI.
