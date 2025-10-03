@@ -28,6 +28,7 @@ class Config:
     DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data")
     CHECKPOINT_DIR: Path = SCRIPT_DIR
     NUM_EPOCHS: int = 500
+    SCALE: int = 4
     BATCH_SIZE: int = 8
     LEARNING_RATE: float = 1e-4
     TIMESTEPS: int = 1000
