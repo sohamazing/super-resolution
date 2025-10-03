@@ -1,4 +1,4 @@
-# Super-Resolution (Super-Res)
+# Photo-Realistic 4x Image Super-Resolution from Scratch
 
 This repository contains multiple from‑scratch implementations of **state-of-the-art image super-resolution models** in PyTorch. It started as an ESRGAN reimplementation and has grown into a modular playground for experimenting with **GAN-based**, **diffusion-based**, and **transformer-based** approaches to super-resolution.
 
