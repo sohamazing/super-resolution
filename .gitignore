@@ -4,7 +4,9 @@ div2K-flickr2K-data/
 data_mount/
 
 # Ignore large model checkpoint files
-*.pth
+esrgan/checkpoints/
+diffusion/checkpoints/
+# *.pth
 
 # Ignore Python cache and environment files
 __pycache__/
