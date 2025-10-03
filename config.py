@@ -3,11 +3,9 @@ from pathlib import Path
 import torch
 import os
 
-class GlobalConfig:
+class SuperResConfig:
     """A single source of truth for all model and training parameters."""
     
-    # --- Project Structure ---
-
     # --- Device and Data Paths ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data")
@@ -38,4 +36,4 @@ class GlobalConfig:
     TIMESTEPS: int = 1000
 
 # Create an instance for easy importing across the project
-config = GlobalConfig()
+config = SuperResConfig()
