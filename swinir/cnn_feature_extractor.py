@@ -57,9 +57,9 @@ class CNNFeatureExtractor(nn.Module):
             feature_maps.append(x)
         return feature_maps
 
-# downsampling during CNN?
+# stride > 1 to extract features at lower resoltuions
 # 
-# class CNNFeatureExtractor(nn.Module):
+# class CNNFeatureExtractorMultiRes(nn.Module):
 #     """
 #     A lightweight CNN to extract multi-scale features.
 #     These features will be fused into the Swin Transformer layers.
