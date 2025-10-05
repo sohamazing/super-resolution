@@ -2,6 +2,7 @@
 from pathlib import Path
 import torch
 import os
+import sys
 
 class SuperResConfig:
     """A single source of truth for all model and training parameters."""
@@ -18,7 +19,7 @@ class SuperResConfig:
     STEP: int = 128
     VAL_SPLIT: float = 0.1
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
-    NUM_WORKERS: int = os.cpu_count() or 4 # 0 if macOS
+    NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
     
     # --- Common Training Parameters ---
     BATCH_SIZE: int = 16 # 8 
