@@ -60,8 +60,7 @@ def sample_and_log_images(model, scheduler, loader, epoch):
 
 def main(args):
     # Initialize Weights & Biases for experiment tracking
-    wandb.init(project="SuperResolution-Diffusion", config=vars(config))
-    
+    wandb.init(project="SuperResolution-Diffusion", config=vars(config), resume="allow", id=args.wandb_id)
     # Setup data loaders
     train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
     val_dataset = SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR")
