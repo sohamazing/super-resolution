@@ -143,7 +143,7 @@ def main(args):
             scheduler_g.step()
             scheduler_d.step()
 
-            if (epoch + 1) % 5 == 0:
+            if (epoch + 1) % 10 == 0:
                 print("...Saving models and logging validation images...")
                 torch.save(generator.state_dict(), CHECKPOINT_DIR / f"generator_epoch_{epoch+1}.pth")
                 torch.save(discriminator.state_dict(), CHECKPOINT_DIR / f"discriminator_epoch_{epoch+1}.pth")

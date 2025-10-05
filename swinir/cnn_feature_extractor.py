@@ -1,4 +1,4 @@
-# swin_ir/cnn_feature_extractor.py
+# swinir/cnn_feature_extractor.py
 import torch
 from torch import nn
 from torch.nn import functional as F

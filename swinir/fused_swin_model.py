@@ -1,4 +1,4 @@
-# swin_ir/swin_ir_model.py
+# swinir/fused_swin_model.py
 import torch
 from torch import nn
 from torch.nn import functional as F
