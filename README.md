@@ -96,14 +96,6 @@ super-res/
 
 ├── swin_ir/                       # Transformer-based SR (in progress)
 
-├── legacy/                        # Archived / older code
-│   ├── train.py
-│   ├── train_orig.py
-│   ├── discriminator.py
-│   ├── generator.py
-│   ├── cleanup_photos_dataset.py
-│   └── prepare_dataset.py
-
 └── wandb/                         # Experiment tracking logs
 ```
 

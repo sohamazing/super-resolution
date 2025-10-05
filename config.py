@@ -17,23 +17,32 @@ class SuperResConfig:
     STEP: int = 128
     VAL_SPLIT: float = 0.1
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
-    NUM_WORKERS: int = os.cpu_count() or 4
+    NUM_WORKERS: int = os.cpu_count() or 4 # 0 if macOS
     
     # --- Common Training Parameters ---
-    BATCH_SIZE: int = 16
+    BATCH_SIZE: int = 16 # 8 
     
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 2000
     PRETRAIN_EPOCHS: int = 20
-    ESRGAN_LR: float = 2e-4
+    ESRGAN_LR: float = 2e-4 # 1e-4 
     LAMBDA_L1: float = 1.0
     LAMBDA_ADV: float = 5e-3
     LAMBDA_PERCEP: float = 1.0
 
     # --- Diffusion Specific ---
-    DIFFUSION_EPOCHS: int = 500
+    DIFFUSION_EPOCHS: int = 2000 # 1000
     DIFFUSION_LR: float = 1e-4
     TIMESTEPS: int = 1000
+
+    # --- SwinIR Specific ---
+    SWIN_EMBED_DIM: int = 180
+    SWIN_NUM_LAYERS: int = 4 # Number of RSTL layers + Fusion Blocks.
+    SWIN_NUM_BLOCKS_PER_LAYER: int = 6 # Number of Swin blocks within each RSTL.
+    SWIN_NUM_HEADS: int = 6
+    SWIN_WINDOW_SIZE: int = 8
+    SWIN_LR: float = 2e-4
+    SWIN_EPOCHS: int = 1000
 
 # Create an instance for easy importing across the project
 config = SuperResConfig()
