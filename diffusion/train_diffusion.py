@@ -93,8 +93,8 @@ def main(args):
         loop = tqdm(train_loader, desc=f"Training Epoch {epoch+1}/{config.DIFFUSION_EPOCHS}")
         avg_loss = 0.0
         
-        for i, (hr_batch, lr_batch) in enumerate(loop):
-            hr_batch, lr_batch = hr_batch.to(config.DEVICE), lr_batch.to(config.DEVICE)
+        for i, (lr_batch, hr_batch) in enumerate(loop):
+            lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
             
             # 1. Pick a random timestep 't' for each image in the batch
             t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=config.DEVICE).long()

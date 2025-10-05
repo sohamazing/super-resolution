@@ -8,7 +8,8 @@ class SuperResConfig:
     
     # --- Device and Data Paths ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data")
+    DATA_DIR: Path = Path("div2K-flickr2K-data")
+    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data")
     # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/div2K-flickr2K-data") # Example for external drive
 
     # --- Data Processing Parameters (for create_patches.py) ---
