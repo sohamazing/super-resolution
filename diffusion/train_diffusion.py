@@ -1,8 +1,8 @@
 # diffusion/train_diffusion.py
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import ToTensor
+from torch.utils.data import DataLoader
+import torchvision.transforms as T
 import torchvision.utils
 from pathlib import Path
 from PIL import Image
