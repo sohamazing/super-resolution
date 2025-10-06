@@ -27,36 +27,39 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 @torch.no_grad()
 def sample_and_log_images(model, scheduler, loader, epoch):
-    """Performs the full denoising loop to generate a sample image and logs it."""
-    model.eval() # Set the model to evaluation mode
+    """
+    Performs the denoising loop on a center-cropped patch of a validation image.
+    This provides an efficient visual sample and removes out-of-memory errors 
+    on arbitrarily large validation images.
+    """
+    model.eval()
     
-    # Get one sample from the validation set
-    hr_sample, lr_sample = next(iter(loader))
-    lr_sample = lr_sample.to(config.DEVICE)
-    hr_sample = hr_sample.to(config.DEVICE)
+    lr_full, hr_full = next(iter(loader))
     
-    # Start the generation process from pure random noise of the target HR shape
+    # Define patch sizes based on the config to match training conditions
+    hr_patch_size = config.PATCH_SIZE
+    lr_patch_size = config.PATCH_SIZE // config.SCALE
+
+    # Create CenterCrop transforms
+    hr_cropper = T.CenterCrop(hr_patch_size)
+    lr_cropper = T.CenterCrop(lr_patch_size)
+
+    # Apply crops to get consistently sized patches for validation
+    hr_sample = hr_cropper(hr_full).to(config.DEVICE)
+    lr_sample = lr_cropper(lr_full).to(config.DEVICE)
+
     img = torch.randn_like(hr_sample).to(config.DEVICE)
-    # Create a simple bicubic upscale of the LR image for visual comparison
     lr_upscaled = nn.functional.interpolate(lr_sample, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
 
-    # The reverse diffusion loop (from t=T-1 down to 0)
     for i in tqdm(reversed(range(0, scheduler.timesteps)), desc="Sampling", total=scheduler.timesteps, leave=False):
         t = torch.full((1,), i, device=config.DEVICE, dtype=torch.long)
-        # Predict the noise in the current image
         predicted_noise = model(img, t, lr_upscaled)
-        # Use the scheduler to take one step back towards a cleaner image
         img = scheduler.sample_previous_timestep(img, t, predicted_noise)
 
-    # Crop the original HR image to match the output size, just in case of rounding errors
-    c, h, w = img.shape[1:]
-    hr_cropped = hr_sample[:, :, :h, :w]
-
-    # Create a grid comparing the Bicubic upscale, our model's output, and the ground truth
-    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_cropped], dim=0), normalize=True)
+    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_sample], dim=0), normalize=True)
     wandb.log({"validation_sample": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
     
-    model.train() # Set the model back to training mode
+    model.train()
 
 def main(args):
     # Initialize Weights & Biases for experiment tracking
