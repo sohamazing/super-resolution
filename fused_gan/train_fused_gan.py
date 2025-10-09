@@ -279,18 +279,18 @@ def main(args):
             scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
             best_psnr = checkpoint.get('best_psnr', 0.0)
             if ema and 'ema_state_dict' in checkpoint: ema.shadow = checkpoint['ema_state_dict']
-            print(f"✅ Checkpoint loaded. Best PSNR so far: {best_psnr:.2f} dB")
+            print(f"Checkpoint loaded. Best PSNR so far: {best_psnr:.2f} dB")
         else:
-            print(f"❌ Warning: Checkpoint not found at {latest_checkpoint_path}")
+            print(f"Warning: Checkpoint not found at {latest_checkpoint_path}")
 
     elif args.mode in ["train", "all"] and pretrained_file.exists():
-        print(f"✅ Loading pretrained generator from '{pretrained_file}'")
+        print(f"Loading pretrained generator from '{pretrained_file}'")
         gen.load_state_dict(torch.load(pretrained_file, map_location=config.DEVICE))
 
     if args.mode in ["pretrain", "all"] and not pretrained_file.exists() and start_epoch == 0:
         pretrain_generator(gen, train_loader, opt_g, scheduler_g_pretrain, scaler_g, autocast_context, ema)
         torch.save(gen.state_dict(), pretrained_file)
-        print(f"✅ Pre-training complete. Model saved to '{pretrained_file}'")
+        print(f"Pre-training complete. Model saved to '{pretrained_file}'")
 
         # Reset optimizers and schedulers for GAN phase
         opt_g = optim.AdamW(gen.parameters(), lr=config.FUSEDGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
@@ -308,7 +308,7 @@ def main(args):
             scheduler_g.step(); scheduler_d.step()
 
             if (epoch + 1) % 5 == 0:
-                print(f"\n📊 Running validation...")
+                print(f"\nRunning validation...")
                 psnr = validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, ema)
                 print(f"  Validation PSNR: {psnr:.2f} dB")
 
@@ -321,7 +321,7 @@ def main(args):
                     best_psnr = psnr
                     checkpoint['best_psnr'] = best_psnr
                     torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-                    print(f"  🌟 New best model! PSNR: {psnr:.2f} dB")
+                    print(f"New best model! PSNR: {psnr:.2f} dB")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Fused-GAN model.")
