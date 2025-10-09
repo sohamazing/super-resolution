@@ -59,12 +59,13 @@ class HCASTGenerator(nn.Module):
         self.bottleneck_conv = nn.Conv2d(features[-1], embed_dim, 1, 1, 0)
 
         self.swin_body = nn.Sequential(
-            *[SwinTransformer(
+            *[SwinTransformerBlock(
                 dim=embed_dim,
                 num_heads=num_heads,
                 window_size=window_size,
                 shift_size=0 if (i % 2 == 0) else window_size // 2,
-                drop=dropout  # Add dropout to Swin blocks
+                attn_drop=dropout,
+                proj_drop=dropout
             ) for i in range(num_swin_blocks)]
         )
 
@@ -173,12 +174,12 @@ class HCASTGeneratorCheckpoint(HCASTGenerator):
         # Bottleneck
         x = self.bottleneck_conv(x)
         B, C, H, W = x.shape
-        x = x.permute(0, 2, 3, 1)
+        x = x.permute(0, 2, 3, 1) # Reshape for Swin: (B, C, H, W) -> (B, H, W, C)
 
         # Swin body (already uses checkpointing if enabled)
         x = self.swin_body(x)
 
-        x = x.permute(0, 3, 1, 2)
+        x = x.permute(0, 3, 1, 2) # Reshape back: (B, H, W, C) -> (B, C, H, W)
         x = self.bottleneck_conv_out(x)
 
         # Decoder (with checkpointing)

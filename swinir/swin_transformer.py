@@ -38,7 +38,7 @@ class WindowAttention(nn.Module):
     """
     Windowed Multi-Head Self-Attention (W-MSA) with relative position bias.
     """
-    def __init__(self, dim, window_size, num_heads):
+    def __init__(self, dim, window_size, num_heads, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.dim = dim
         self.window_size = window_size
@@ -46,13 +46,9 @@ class WindowAttention(nn.Module):
         head_dim = dim // num_heads
         self.scale = head_dim ** -0.5
 
-        # --- Relative Position Bias ---
-        # This is a key part of Swin. It allows the model to understand positions
-        # relative to each other within a window, which is crucial for images.
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads))
         
-        # Get pair-wise relative position index for each token inside the window
         coords_h = torch.arange(self.window_size)
         coords_w = torch.arange(self.window_size)
         coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
@@ -66,7 +62,9 @@ class WindowAttention(nn.Module):
         self.register_buffer("relative_position_index", relative_position_index)
         
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
-        self.to_out = nn.Linear(dim, dim)
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim, dim)
+        self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, mask=None):
         B_, N, C = x.shape
@@ -76,13 +74,11 @@ class WindowAttention(nn.Module):
         q = q * self.scale
         attn = (q @ k.transpose(-2, -1))
 
-        # Add the relative position bias
         relative_position_bias = self.relative_position_bias_table[self.relative_position_index.view(-1)].view(
             self.window_size * self.window_size, self.window_size * self.window_size, -1)
         relative_position_bias = relative_position_bias.permute(2, 0, 1).contiguous()
         attn = attn + relative_position_bias.unsqueeze(0)
 
-        # The mask is used for the *shifted* window attention
         if mask is not None:
             nW = mask.shape[0]
             attn = attn.view(B_ // nW, nW, self.num_heads, N, N) + mask.unsqueeze(1).unsqueeze(0)
@@ -91,13 +87,16 @@ class WindowAttention(nn.Module):
         else:
             attn = F.softmax(attn, dim=-1)
 
-        out = (attn @ v).transpose(1, 2).reshape(B_, N, C)
-        out = self.to_out(out)
-        return out
+        attn = self.attn_drop(attn)
+        
+        x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
 
 class SwinTransformer(nn.Module):
     """The main Swin Transformer Block."""
-    def __init__(self, dim, num_heads, window_size=8, shift_size=0):
+    def __init__(self, dim, num_heads, window_size=8, shift_size=0, attn_drop=0.0, proj_drop=0.0):
         super().__init__()
         self.dim = dim
         self.num_heads = num_heads
@@ -105,21 +104,23 @@ class SwinTransformer(nn.Module):
         self.shift_size = shift_size
 
         self.norm1 = nn.LayerNorm(dim)
-        self.attn = WindowAttention(dim, window_size, num_heads)
+        self.attn = WindowAttention(dim, window_size, num_heads, attn_drop, proj_drop)
         self.norm2 = nn.LayerNorm(dim)
         self.mlp = nn.Sequential(
             nn.Linear(dim, 4 * dim),
             nn.GELU(),
-            nn.Dropout(0.1),
             nn.Linear(4 * dim, dim),
-            nn.Dropout(0.1)
+            nn.Dropout(proj_drop) # Use proj_drop for MLP as well
         )
+        
+        # ✅ FIX: The attention mask creation depends on the input size,
+        # so it must be calculated in the forward pass, not in __init__.
+        self.attn_mask = None
 
-        # The attention mask is only created if we are using a shifted window
+    def create_mask(self, H, W, device):
+        # Only create a mask if we are using a shifted window
         if self.shift_size > 0:
-            # Dynamic mask based on actual input size
-            B, H, W, C = x.shape
-            img_mask = torch.zeros((1, H, W, 1), device=x.device)
+            img_mask = torch.zeros((1, H, W, 1), device=device)
             h_slices = (slice(0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
             w_slices = (slice(0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
             cnt = 0
@@ -131,41 +132,205 @@ class SwinTransformer(nn.Module):
             mask_windows = mask_windows.view(-1, self.window_size * self.window_size)
             attn_mask = mask_windows.unsqueeze(1) - mask_windows.unsqueeze(2)
             attn_mask = attn_mask.masked_fill(attn_mask != 0, float(-100.0)).masked_fill(attn_mask == 0, float(0.0))
-            self.register_buffer("attn_mask", attn_mask)
+            return attn_mask
         else:
-            self.attn_mask = None
+            return None
 
     def forward(self, x):
-        # The input x here is (B, H, W, C) from the HCAST reshape
         B, H, W, C = x.shape
         shortcut = x
-        x = self.norm1(x)
-        x = x.view(B, H * W, C) # Flatten H, W to L for attention
+        
+        # ✅ FIX: Create the mask dynamically in the forward pass
+        # This prevents the NameError from the original __init__
+        if self.shift_size > 0:
+            self.attn_mask = self.create_mask(H, W, x.device)
 
-        # --- Cyclic Shift ---
+        x = self.norm1(x)
+
+        # ✅ FIX: Correct logic for cyclic shift and windowing
+        # The shift must happen on the 4D tensor *before* partitioning.
         if self.shift_size > 0:
             shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
             shifted_x = x
 
-        # --- Window Partition ---
         x_windows = window_partition(shifted_x, self.window_size)
         x_windows = x_windows.view(-1, self.window_size * self.window_size, C)
 
-        # --- W-MSA / SW-MSA ---
         attn_windows = self.attn(x_windows, mask=self.attn_mask)
 
-        # --- Merge Windows ---
         attn_windows = attn_windows.view(-1, self.window_size, self.window_size, C)
         shifted_x = window_reverse(attn_windows, self.window_size, H, W)
 
-        # --- Reverse Cyclic Shift ---
         if self.shift_size > 0:
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
         
-        # --- FFN ---
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
         return x
+```eof
+
+### 2. The Corrected Generator
+
+This file now correctly imports `SwinTransformer` and passes the appropriate `attn_drop` and `proj_drop` arguments to it, resolving the `TypeError`.
+
+```python:HCAST Generator (Corrected):fused_gan/generator_hcast.py
+# fused_gan/generator_hcast.py
+import torch
+from torch import nn
+import torch.nn.functional as F
+import sys
+from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).parent.absolute()
+sys.path.append(str(SCRIPT_DIR.parent))
+
+# ✅ FIX: Correctly import the fixed SwinTransformer class
+from swinir.swin_transformer import SwinTransformer
+
+class ConvBlock(nn.Module):
+    """Standard conv block with optional normalization."""
+    def __init__(self, in_channels, out_channels, use_norm=True, dropout=0.0):
+        super().__init__()
+        layers = [
+            nn.Conv2d(in_channels, out_channels, 3, 1, 1, bias=not use_norm),
+            nn.InstanceNorm2d(out_channels) if use_norm else nn.Identity(),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+        if dropout > 0:
+            layers.append(nn.Dropout2d(dropout))
+        self.conv = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.conv(x)
+
+class HCASTGenerator(nn.Module):
+    """
+    Hierarchical CNN-Attention Super-Resolution Transformer (H-CAST) Generator.
+    """
+    def __init__(self, in_channels=3, out_channels=3, features=[64, 128, 256],
+                 embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=6,
+                 scale=4, dropout=0.1):
+        super().__init__()
+        self.scale = scale
+
+        self.initial_conv = nn.Sequential(
+            nn.Conv2d(in_channels, features[0], 3, 1, 1),
+            nn.LeakyReLU(0.2, inplace=True),
+        )
+
+        self.down_blocks = nn.ModuleList()
+        in_c = features[0]
+        for feature in features[1:]:
+            self.down_blocks.append(
+                nn.Sequential(
+                    ConvBlock(in_c, feature, dropout=dropout),
+                    nn.Conv2d(feature, feature, 4, 2, 1)
+                )
+            )
+            in_c = feature
+
+        self.bottleneck_conv = nn.Conv2d(features[-1], embed_dim, 1, 1, 0)
+
+        self.swin_body = nn.Sequential(
+            *[SwinTransformer(
+                dim=embed_dim,
+                num_heads=num_heads,
+                window_size=window_size,
+                shift_size=0 if (i % 2 == 0) else window_size // 2,
+                # ✅ FIX: Pass the dropout value to the correct parameters
+                attn_drop=dropout,
+                proj_drop=dropout
+            ) for i in range(num_swin_blocks)]
+        )
+
+        self.bottleneck_conv_out = nn.Conv2d(embed_dim, features[-1], 3, 1, 1)
+
+        self.up_blocks = nn.ModuleList()
+        reversed_features = list(reversed(features))
+        for i in range(len(reversed_features) - 1):
+            self.up_blocks.append(
+                nn.Sequential(
+                    nn.ConvTranspose2d(reversed_features[i] * 2, reversed_features[i+1], 4, 2, 1),
+                    ConvBlock(reversed_features[i+1], reversed_features[i+1], dropout=dropout)
+                )
+            )
+
+        self.reconstruction_head = nn.Sequential(
+            nn.Conv2d(features[0] * 2, features[0] * (scale**2), 3, 1, 1),
+            nn.PixelShuffle(scale),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(features[0], out_channels, 3, 1, 1)
+        )
+
+    def forward(self, x):
+        skip_connections = []
+        x = self.initial_conv(x)
+        skip_connections.append(x)
+
+        for block in self.down_blocks:
+            x = block(x)
+            skip_connections.append(x)
+
+        x = self.bottleneck_conv(x)
+        x = x.permute(0, 2, 3, 1) # Reshape for Swin: (B, C, H, W) -> (B, H, W, C)
+        
+        x = self.swin_body(x)
+
+        x = x.permute(0, 3, 1, 2) # Reshape back: (B, H, W, C) -> (B, C, H, W)
+        x = self.bottleneck_conv_out(x)
+
+        for block in self.up_blocks:
+            skip_conn = skip_connections.pop()
+            x = torch.cat([x, skip_conn], dim=1)
+            x = block(x)
+
+        final_skip = skip_connections.pop()
+        x = torch.cat([x, final_skip], dim=1)
+
+        return self.reconstruction_head(x)
+
+    def load_pretrained(self, pretrained_path):
+        """Load pretrained weights with error handling."""
+        try:
+            state_dict = torch.load(pretrained_path, map_location='cpu')
+            self.load_state_dict(state_dict, strict=True)
+            print(f"Successfully loaded pretrained weights from {pretrained_path}")
+        except Exception as e:
+            print(f"Warning: Could not load pretrained weights: {e}")
+            print("Continuing with random initialization...")
+
+# The gradient checkpointing version does not need to be changed as it inherits the fixes.
+class HCASTGeneratorCheckpoint(HCASTGenerator):
+    """
+    Version with gradient checkpointing for even lower memory usage.
+    """
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        for module in self.swin_body:
+            if hasattr(module, 'set_grad_checkpointing'):
+                module.set_grad_checkpointing(True)
+
+    def forward(self, x):
+        from torch.utils.checkpoint import checkpoint
+        skip_connections = []
+        x = checkpoint(self.initial_conv, x, use_reentrant=False)
+        skip_connections.append(x)
+        for block in self.down_blocks:
+            x = checkpoint(block, x, use_reentrant=False)
+            skip_connections.append(x)
+        x = self.bottleneck_conv(x)
+        x = x.permute(0, 2, 3, 1)
+        x = self.swin_body(x)
+        x = x.permute(0, 3, 1, 2)
+        x = self.bottleneck_conv_out(x)
+        for block in self.up_blocks:
+            skip_conn = skip_connections.pop()
+            x = torch.cat([x, skip_conn], dim=1)
+            x = checkpoint(block, x, use_reentrant=False)
+        final_skip = skip_connections.pop()
+        x = torch.cat([x, final_skip], dim=1)
+        return checkpoint(self.reconstruction_head, x, use_reentrant=False)
+```eof
