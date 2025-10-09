@@ -253,17 +253,14 @@ def main(args):
     # Scheduler for pretrain phase
     scheduler_g_pretrain = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.PRETRAIN_EPOCHS, eta_min=1e-6)
 
-    if config.DEVICE == "cuda":
-        scaler_g, scaler_d = torch.cuda.amp.GradScaler(), torch.cuda.amp.GradScaler()
-        autocast_context = torch.cuda.amp.autocast()
-    else:
-        class DummyScaler:
-            def scale(self, loss): return loss
-            def step(self, optimizer): optimizer.step()
-            def update(self): pass
-            def unscale_(self, optimizer): pass
-        scaler_g, scaler_d = DummyScaler(), DummyScaler()
-        autocast_context = contextlib.nullcontext()
+    # Cross-platform Automatic Mixed Precision (AMP) setup
+    amp_enabled = config.DEVICE != 'cpu'
+    # Use bfloat16 for MPS (Apple Silicon) if available, otherwise float16 for CUDA
+    dtype = torch.bfloat16 if config.DEVICE == 'mps' and torch.cuda.is_bf16_supported() else torch.float16
+    
+    scaler_g = torch.amp.GradScaler(device_type=config.DEVICE, enabled=amp_enabled)
+    scaler_d = torch.amp.GradScaler(device_type=config.DEVICE, enabled=amp_enabled)
+    autocast_context = torch.amp.autocast(device_type=config.DEVICE, dtype=dtype, enabled=amp_enabled)
 
     ema = EMA(gen) if args.use_ema else None
     if ema:
