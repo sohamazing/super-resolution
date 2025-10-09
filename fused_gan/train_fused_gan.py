@@ -223,15 +223,11 @@ def main(args):
     train_dataset = TrainDataset(
         hr_dir=config.DATA_DIR / "train" / "HR",
         lr_dir=config.DATA_DIR / "train" / "LR",
-        scale_factor=config.SCALE,
-        hr_crop_size=config.HR_CROP_SIZE
     ) 
     # Use ValDataset for the validation set (with center cropping)
     val_dataset = ValDataset(
         hr_dir=config.DATA_DIR / "val" / "HR",
         lr_dir=config.DATA_DIR / "val" / "LR",
-        scale_factor=config.SCALE,
-        hr_crop_size=config.HR_CROP_SIZE
     )
 
     train_loader = DataLoader(
