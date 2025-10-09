@@ -20,7 +20,7 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 from esrgan.generator import GeneratorRRDB
 from esrgan.discriminator import Discriminator
-from utils.datasets import SuperResDataset
+from utils.datasets import TrainDataset, ValDataset
 from utils.loss import VGGLoss
 from config import config
 
@@ -66,7 +66,14 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss
 def main(args):
     wandb.init(project="SuperResolution-ESRGAN", config=vars(config), resume="allow", id=args.wandb_id)
 
-    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
+    train_dataset = TrainDataset(
+        hr_dir=config.DATA_DIR / "train" / "HR",
+        lr_dir=config.DATA_DIR / "train" / "LR"
+    )
+    val_dataset = ValDataset(
+        hr_dir=config.DATA_DIR / "val" / "HR",
+        lr_dir=config.DATA_DIR / "val" / "LR"
+    )
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.BATCH_SIZE,
@@ -74,6 +81,8 @@ def main(args):
         num_workers=config.NUM_WORKERS, # Uses multiple cores for fetching
         pin_memory=(config.DEVICE == "cuda") # Pin memory only if CUDA is selected
     )
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
+
     generator = GeneratorRRDB().to(config.DEVICE)
     discriminator = Discriminator().to(config.DEVICE)
     optimizer_g = optim.Adam(generator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
@@ -143,22 +152,28 @@ def main(args):
                 torch.save(optimizer_g.state_dict(), CHECKPOINT_DIR / f"optimizer_g_epoch_{epoch+1}.pth")
                 torch.save(optimizer_d.state_dict(), CHECKPOINT_DIR / f"optimizer_d_epoch_{epoch+1}.pth")
 
-                val_dataset = SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR")
-                if len(val_dataset) > 0:
-                    generator.eval()
-                    with torch.no_grad():
-                        lr, hr = val_dataset[0]
-                        lr_batch = lr.unsqueeze(0).to(config.DEVICE)
-                        fake_hr = generator(lr_batch)
-                        bicubic_hr = torch.nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
+                generator.eval()
+                with torch.no_grad():
+                    # Validation images
+                    lr_batch, hr_batch = next(iter(val_loader))
+                    lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
+                    # Generate the super-resolved image
+                    fake_hr = generator(lr_batch) 
+                    # Bicubic upscale as a baseline comparison
+                    bicubic_hr = torch.nn.functional.interpolate( 
+                        lr_batch,
+                        scale_factor=config.SCALE,
+                        mode='bicubic',
+                        align_corners=False
+                    )
+                    # First 4 images only (for a cleaner visual)
+                    num_samples = min(4, lr_batch.size(0))
+                    # [Baseline | Model Output | Ground Truth]
+                    image_grid = torch.cat([bicubic_hr[:num_samples], fake_hr[:num_samples], hr_batch[:num_samples]], dim=0)
+                    grid = torchvision.utils.make_grid(image_grid, normalize=True, nrow=num_samples)
+                    wandb.log({"validation_samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
 
-                        c, h, w = fake_hr.shape[1:]
-                        hr_cropped = hr.unsqueeze(0)[:, :, :h, :w].to(config.DEVICE)
-
-                        image_grid = torch.cat([bicubic_hr, fake_hr, hr_cropped], dim=0)
-                        grid = torchvision.utils.make_grid(image_grid, normalize=True)
-                        wandb.log({"validation_grid": wandb.Image(grid)})
-                    generator.train()
+                generator.train()
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Super-Resolution GAN.")

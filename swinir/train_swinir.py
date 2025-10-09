@@ -17,7 +17,7 @@ CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
 from swinir.fused_swinir_model import FusedSwinIR
-from utils.datasets import SuperResDataset
+from utils.datasets import TrainDataset, ValDataset
 from config import config
 
 def train_one_epoch(model, loader, optimizer, loss_fn, scaler):
@@ -53,12 +53,23 @@ def main(args):
     # Initialize Weights & Biases for experiment tracking
     wandb.init(project="SuperResolution-FusedSwinIR", config=vars(config), resume="allow", id=args.wandb_id)
     
-    # Setup data loaders using parameters from our central config file
-    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=True)
-    
-    val_dataset = SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR")
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=False)
+    train_dataset = TrainDataset(
+        hr_dir=config.DATA_DIR / "train" / "HR", 
+        lr_dir=config.DATA_DIR / "train" / "LR",
+        scale_factor=config.SCALE
+    )
+    val_dataset = ValDataset(
+        hr_dir=config.DATA_DIR / "val" / "HR", 
+        lr_dir=config.DATA_DIR / "val" / "LR",
+        scale_factor=config.SCALE,
+        hr_crop_size=config.HR_CROP_SIZE
+    )
+
+    train_loader = DataLoader(
+        train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
+        num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda")
+    )
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True)
 
     # Initialize our custom FusedSwinIR model
     model = FusedSwinIR(

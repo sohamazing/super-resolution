@@ -1,38 +1,20 @@
 import os
+import sys
 import cv2
 import numpy as np
 import rawpy
 import imageio.v2 as imageio # Use v2 to silence the deprecation warning
 from tqdm import tqdm
 from pathlib import Path
-from dataclasses import dataclass, field
 from concurrent.futures import ProcessPoolExecutor
 import random
-
 # Imports for HEIC support
 import pillow_heif
 pillow_heif.register_heif_opener()
 
-## --- CONFIGURATION --- ##
-@dataclass
-class Config:
-    TRAIN_VAL_SOURCES: list = field(default_factory=lambda: [
-        Path.home() / "Desktop" / "Photos" / "Flickr2K" / "Flickr2K_HR",
-        Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_train_HR",
-    ])
-    TEST_SOURCES: list = field(default_factory=lambda: [
-        Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_valid_HR"
-    ])
-    OUTPUT_DIR: Path = Path("div2K-flickr2K-data")
-    PATCH_SIZE: int = 512
-    SCALE: int = 4
-    STEP: int = 256
-    VAL_SPLIT: float = 0.1
-    SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
-    NUM_WORKERS: int = os.cpu_count() or 4
-
-config = Config()
-## --------------------- ##
+SCRIPT_DIR = Path(__file__).parent.absolute()
+sys.path.append(str(SCRIPT_DIR.parent))
+from config import config
 
 
 def read_image(path: Path) -> np.ndarray | None:
@@ -114,12 +96,12 @@ def process_image_pair(path, hr_dir, lr_dir):
 def main():
     # --- 1. Setup Directories ---
     print("Setting up directories...")
-    hr_train_dir = config.OUTPUT_DIR / "train" / "HR"
-    lr_train_dir = config.OUTPUT_DIR / "train" / "LR"
-    hr_val_dir = config.OUTPUT_DIR / "val" / "HR"
-    lr_val_dir = config.OUTPUT_DIR / "val" / "LR"
-    hr_test_dir = config.OUTPUT_DIR / "test" / "HR"
-    lr_test_dir = config.OUTPUT_DIR / "test" / "LR"
+    hr_train_dir = config.DATA_DIR / "train" / "HR"
+    lr_train_dir = config.DATA_DIR / "train" / "LR"
+    hr_val_dir = config.DATA_DIR / "val" / "HR"
+    lr_val_dir = config.DATA_DIR / "val" / "LR"
+    hr_test_dir = config.DATA_DIR / "test" / "HR"
+    lr_test_dir = config.DATA_DIR / "test" / "LR"
     for path in [hr_train_dir, lr_train_dir, hr_val_dir, lr_val_dir, hr_test_dir, lr_test_dir]:
         path.mkdir(parents=True, exist_ok=True)
 

@@ -1,5 +1,6 @@
 # config.py
 from pathlib import Path
+from dataclasses import dataclass, field
 import torch
 import os
 import sys
@@ -8,24 +9,33 @@ class SuperResConfig:
     """A single source of truth for all model and training parameters."""
     
     # --- Device and Data Paths ---
-    DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    DATA_DIR: Path = Path("div2K-flickr2K-data")
-    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data")
-    # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/div2K-flickr2K-data") # Example for external drive
+    TRAIN_VAL_SOURCES: list = field(default_factory=lambda: [
+        Path.home() / "Desktop" / "Photos" / "Flickr2K" / "Flickr2K_HR",
+        Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_train_HR",
+    ])
+    TEST_SOURCES: list = field(default_factory=lambda: [
+        Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_valid_HR"
+    ])
+    DATA_DIR: Path = Path("div2K-flickr2K-data") # relative local path 
+    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data") # absolute path
+    # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/div2K-flickr2K-data") # for external drive
+    SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
+    VAL_SPLIT: float = 0.1
 
     # --- Data Processing Parameters (for create_patches.py) ---
     PATCH_SIZE: int = 256
-    SCALE: int = 4
     STEP: int = 128
-    VAL_SPLIT: float = 0.1
+    SCALE: int = 4
+    HR_CROP_SIZE = PATCH_SIZE
+    LR_CROP_SIZE = PATCH_SIZE // SCALE
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
-    NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
     
     # --- Common Training Parameters ---
+    DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
+    NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
     BATCH_SIZE: int = 16 # 8 
     PRETRAIN_EPOCHS: int = 20
 
-    
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 2000
     ESRGAN_LR: float = 2e-4 # 1e-4 

@@ -18,7 +18,7 @@ sys.path.append(str(SCRIPT_DIR.parent)) # .../super-res/
 
 from diffusion.diffusion_model import DiffusionUNet
 from diffusion.scheduler import Scheduler
-from utils.datasets import SuperResDataset
+from utils.datasets import TrainDataset, ValDataset
 from config import config # Import the new central config
 
 # Define and create a local checkpoint directory inside the diffusion folder
@@ -33,30 +33,22 @@ def sample_and_log_images(model, scheduler, loader, epoch):
     on arbitrarily large validation images.
     """
     model.eval()
-    
-    lr_full, hr_full = next(iter(loader))
-    
-    # Define patch sizes based on the config to match training conditions
-    hr_patch_size = config.PATCH_SIZE
-    lr_patch_size = config.PATCH_SIZE // config.SCALE
 
-    # Create CenterCrop transforms
-    hr_cropper = T.CenterCrop(hr_patch_size)
-    lr_cropper = T.CenterCrop(lr_patch_size)
+    lr_batch, hr_batch = next(iter(loader))
+    lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
 
-    # Apply crops to get consistently sized patches for validation
-    hr_sample = hr_cropper(hr_full).to(config.DEVICE)
-    lr_sample = lr_cropper(lr_full).to(config.DEVICE)
-
-    img = torch.randn_like(hr_sample).to(config.DEVICE)
-    lr_upscaled = nn.functional.interpolate(lr_sample, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
+    # Start with random noise of the same shape as the HR sample
+    img = torch.randn_like(hr_batch)
+    lr_upscaled = nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
 
     for i in tqdm(reversed(range(0, scheduler.timesteps)), desc="Sampling", total=scheduler.timesteps, leave=False):
-        t = torch.full((1,), i, device=config.DEVICE, dtype=torch.long)
+        # Ensure the timestep tensor matches the batch size
+        t = torch.full((img.shape[0],), i, device=config.DEVICE, dtype=torch.long)
         predicted_noise = model(img, t, lr_upscaled)
         img = scheduler.sample_previous_timestep(img, t, predicted_noise)
 
-    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_sample], dim=0), normalize=True)
+    # Log a grid of [Bicubic | Denoised Output | Ground Truth]
+    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_batch], dim=0), normalize=True)
     wandb.log({"validation_sample": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
     
     model.train()
@@ -65,10 +57,22 @@ def main(args):
     # Initialize Weights & Biases for experiment tracking
     wandb.init(project="SuperResolution-Diffusion", config=vars(config), resume="allow", id=args.wandb_id)
     # Setup data loaders
-    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
-    val_dataset = SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR")
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS)
-    val_loader = DataLoader(val_dataset, batch_size=1, shuffle=True)
+    train_dataset = TrainDataset(
+        hr_dir=config.DATA_DIR / "train" / "HR",
+        lr_dir=config.DATA_DIR / "train" / "LR"
+    )
+    val_dataset = ValDataset(
+        hr_dir=config.DATA_DIR / "val" / "HR",
+        lr_dir=config.DATA_DIR / "val" / "LR"
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=config.NUM_WORKERS, # Uses multiple cores for fetching
+        pin_memory=(config.DEVICE == "cuda") # Pin memory only if CUDA is selected
+    )
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
     # Initialize model, scheduler, optimizer, and loss function
     model = DiffusionUNet().to(config.DEVICE)
@@ -107,13 +111,10 @@ def main(args):
             noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
             # 4. Create the LR image condition, upscaled to the target size
             lr_upscaled = nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-            
             # 5. Get the model's prediction of the noise
             predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
-            
             # 6. Calculate the loss between the actual noise and the predicted noise
             loss = loss_fn(noise, predicted_noise)
-
             # 7. Backpropagation
             optimizer.zero_grad()
             loss.backward()

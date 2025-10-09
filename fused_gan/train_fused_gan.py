@@ -19,7 +19,7 @@ sys.path.append(str(SCRIPT_DIR.parent))
 from fused_gan.generator_hcast import HCASTGenerator
 from fused_gan.discriminator_unet import DiscriminatorUNet
 from utils.loss import FusedGANLoss
-from utils.datasets import SuperResDataset
+from utils.datasets import TrainDataset, ValDataset
 from config import config
 
 # Define the directory for saving model checkpoints.
@@ -219,14 +219,30 @@ def main(args):
         project="SuperResolution-FusedGAN", config=vars(config),
         resume="allow" if args.wandb_id else None, id=args.wandb_id
     )
-
-    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
-    train_loader = DataLoader(
-        train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-        num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda"),
-        persistent_workers=(config.NUM_WORKERS > 0), prefetch_factor=2 if config.NUM_WORKERS > 0 else None
+    # Use TrainDataset for the training set (already cropped, adds rotations)
+    train_dataset = TrainDataset(
+        hr_dir=config.DATA_DIR / "train" / "HR",
+        lr_dir=config.DATA_DIR / "train" / "LR",
+        scale_factor=config.SCALE,
+        hr_crop_size=config.HR_CROP_SIZE
+    ) 
+    # Use ValDataset for the validation set (with center cropping)
+    val_dataset = ValDataset(
+        hr_dir=config.DATA_DIR / "val" / "HR",
+        lr_dir=config.DATA_DIR / "val" / "LR",
+        scale_factor=config.SCALE,
+        hr_crop_size=config.HR_CROP_SIZE
     )
-    val_loader = DataLoader(SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR"), batch_size=4, shuffle=False)
+
+    train_loader = DataLoader(
+        train_dataset, 
+        batch_size=config.BATCH_SIZE, shuffle=True,
+        num_workers=config.NUM_WORKERS,
+        pin_memory=(config.DEVICE == "cuda"),
+        persistent_workers=(config.NUM_WORKERS > 0),
+        prefetch_factor=2 if config.NUM_WORKERS > 0 else None
+    )
+    val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
     gen = HCASTGenerator().to(config.DEVICE)
     disc = DiscriminatorUNet().to(config.DEVICE)
@@ -302,9 +318,12 @@ def main(args):
         print("\n--- Starting Main Fused-GAN Training ---")
         for epoch in range(start_epoch, config.FUSEDGAN_EPOCHS):
             metrics = train_one_epoch(gen, disc, train_loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d, autocast_context, ema, epoch)
-
-            wandb.log({"train/epoch_d_loss": metrics['d_loss'], "train/epoch_g_loss": metrics['g_loss'], "train/lr_g": scheduler_g.get_last_lr()[0], "epoch": epoch + 1})
-
+            wandb.log({
+                "train/epoch_d_loss": metrics['d_loss'], 
+                "train/epoch_g_loss": metrics['g_loss'], 
+                "train/lr_g": scheduler_g.get_last_lr()[0], 
+                "epoch": epoch + 1
+            })
             scheduler_g.step(); scheduler_d.step()
 
             if (epoch + 1) % 5 == 0:
