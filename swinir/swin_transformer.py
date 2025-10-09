@@ -95,7 +95,7 @@ class WindowAttention(nn.Module):
         out = self.to_out(out)
         return out
 
-class SwinTransformerBlock(nn.Module):
+class SwinTransformer(nn.Module):
     """The main Swin Transformer Block."""
     def __init__(self, dim, num_heads, window_size=8, shift_size=0):
         super().__init__()
@@ -110,14 +110,16 @@ class SwinTransformerBlock(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(dim, 4 * dim),
             nn.GELU(),
+            nn.Dropout(0.1),
             nn.Linear(4 * dim, dim),
+            nn.Dropout(0.1)
         )
 
         # The attention mask is only created if we are using a shifted window
         if self.shift_size > 0:
-            # This mask prevents attention between non-adjacent regions in shifted windows
-            H, W = 256, 256 # Assume a large enough feature map size for mask generation
-            img_mask = torch.zeros((1, H, W, 1))
+            # Dynamic mask based on actual input size
+            B, H, W, C = x.shape
+            img_mask = torch.zeros((1, H, W, 1), device=x.device)
             h_slices = (slice(0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
             w_slices = (slice(0, -self.window_size), slice(-self.window_size, -self.shift_size), slice(-self.shift_size, None))
             cnt = 0
@@ -134,12 +136,11 @@ class SwinTransformerBlock(nn.Module):
             self.attn_mask = None
 
     def forward(self, x):
-        H, W = x.shape[1], x.shape[2]
-        B, L, C = x.shape # Input is (B, H*W, C)
-        x = x.view(B, H, W, C)
-        
+        # The input x here is (B, H, W, C) from the HCAST reshape
+        B, H, W, C = x.shape
         shortcut = x
         x = self.norm1(x)
+        x = x.view(B, H * W, C) # Flatten H, W to L for attention
 
         # --- Cyclic Shift ---
         if self.shift_size > 0:

@@ -12,7 +12,7 @@ import torchvision.transforms as T
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
-from swin_ir.swin_ir_model import FusedSwinIR
+from swinir.fused_swinir_model import FusedSwinIR
 from config import config
 
 def run_inference(args):

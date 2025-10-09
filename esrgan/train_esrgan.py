@@ -21,20 +21,8 @@ CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 from esrgan.generator import GeneratorRRDB
 from esrgan.discriminator import Discriminator
 from utils.datasets import SuperResDataset
+from utils.loss import VGGLoss
 from config import config
-
-class VGGLoss(nn.Module):
-    """Calculates the VGG Perceptual Loss."""
-    def __init__(self):
-        super().__init__()
-        vgg = vgg19(weights='IMAGENET1K_V1').features[:36].eval().to(config.DEVICE)
-        for param in vgg.parameters():
-            param.requires_grad = False
-        self.vgg = vgg
-        self.loss = nn.L1Loss()
-
-    def forward(self, input, target):
-        return self.loss(self.vgg(input), self.vgg(target))
 
 def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss):
     """A single training loop for one epoch of GAN training."""
@@ -50,7 +38,7 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss
         loss_disc_real = adv_loss(disc_real, torch.ones_like(disc_real))
         loss_disc_fake = adv_loss(disc_fake, torch.zeros_like(disc_fake))
         loss_disc = (loss_disc_real + loss_disc_fake) / 2
-        
+
         disc.zero_grad()
         loss_disc.backward()
         opt_d.step()
@@ -61,11 +49,11 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss
         gen_l1_loss = l1_loss(fake, hr)
         gen_vgg_loss = vgg_loss(fake, hr)
         loss_gen = (config.LAMBDA_L1 * gen_l1_loss) + (config.LAMBDA_ADV * gen_adv_loss) + (config.LAMBDA_PERCEP * gen_vgg_loss)
-        
+
         gen.zero_grad()
         loss_gen.backward()
         opt_g.step()
-        
+
         # Log losses to wandb
         wandb.log({
             "discriminator_loss": loss_disc.item(),
@@ -77,15 +65,20 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss
 
 def main(args):
     wandb.init(project="SuperResolution-ESRGAN", config=vars(config), resume="allow", id=args.wandb_id)
-    
-    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
-    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=0)
 
+    train_dataset = SuperResDataset(config.DATA_DIR / "train" / "HR", config.DATA_DIR / "train" / "LR")
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config.BATCH_SIZE,
+        shuffle=True,
+        num_workers=config.NUM_WORKERS, # Uses multiple cores for fetching
+        pin_memory=(config.DEVICE == "cuda") # Pin memory only if CUDA is selected
+    )
     generator = GeneratorRRDB().to(config.DEVICE)
     discriminator = Discriminator().to(config.DEVICE)
     optimizer_g = optim.Adam(generator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
     optimizer_d = optim.Adam(discriminator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
-    
+
     start_epoch = 0
     if args.resume_epoch > 0:
         start_epoch = args.resume_epoch
@@ -94,7 +87,7 @@ def main(args):
         disc_path = CHECKPOINT_DIR / f"discriminator_epoch_{start_epoch}.pth"
         generator.load_state_dict(torch.load(gen_path, map_location=config.DEVICE))
         discriminator.load_state_dict(torch.load(disc_path, map_location=config.DEVICE))
-        
+
         try:
             opt_g_path = CHECKPOINT_DIR / f"optimizer_g_epoch_{start_epoch}.pth"
             opt_d_path = CHECKPOINT_DIR / f"optimizer_d_epoch_{start_epoch}.pth"
@@ -106,7 +99,7 @@ def main(args):
 
     scheduler_g = optim.lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
     scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
-    
+
     l1_loss = nn.L1Loss()
     vgg_loss = VGGLoss()
     adversarial_loss = nn.BCEWithLogitsLoss()
@@ -135,7 +128,7 @@ def main(args):
     if args.mode == "train" or args.mode == "all":
         if args.resume_epoch == 0:
             generator.load_state_dict(torch.load(pretrained_file, map_location=config.DEVICE))
-            
+
         print("--- Starting Main GAN Training ---")
         for epoch in range(start_epoch, config.ESRGAN_EPOCHS):
             print(f"\n--- Main Training Epoch {epoch+1}/{config.ESRGAN_EPOCHS} ---")
@@ -149,7 +142,7 @@ def main(args):
                 torch.save(discriminator.state_dict(), CHECKPOINT_DIR / f"discriminator_epoch_{epoch+1}.pth")
                 torch.save(optimizer_g.state_dict(), CHECKPOINT_DIR / f"optimizer_g_epoch_{epoch+1}.pth")
                 torch.save(optimizer_d.state_dict(), CHECKPOINT_DIR / f"optimizer_d_epoch_{epoch+1}.pth")
-                
+
                 val_dataset = SuperResDataset(config.DATA_DIR / "val" / "HR", config.DATA_DIR / "val" / "LR")
                 if len(val_dataset) > 0:
                     generator.eval()
@@ -158,7 +151,7 @@ def main(args):
                         lr_batch = lr.unsqueeze(0).to(config.DEVICE)
                         fake_hr = generator(lr_batch)
                         bicubic_hr = torch.nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-                        
+
                         c, h, w = fake_hr.shape[1:]
                         hr_cropped = hr.unsqueeze(0)[:, :, :h, :w].to(config.DEVICE)
 

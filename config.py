@@ -23,10 +23,11 @@ class SuperResConfig:
     
     # --- Common Training Parameters ---
     BATCH_SIZE: int = 16 # 8 
+    PRETRAIN_EPOCHS: int = 20
+
     
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 2000
-    PRETRAIN_EPOCHS: int = 20
     ESRGAN_LR: float = 2e-4 # 1e-4 
     LAMBDA_L1: float = 1.0
     LAMBDA_ADV: float = 5e-3
@@ -45,6 +46,10 @@ class SuperResConfig:
     SWIN_WINDOW_SIZE: int = 8
     SWIN_LR: float = 2e-4
     SWIN_EPOCHS: int = 1000
+
+    # --- Fused-GAN Specific ---
+    FUSEDGAN_EPOCHS: int = 1000
+    FUSEDGAN_LR: float = 1e-4
 
 # Create an instance for easy importing across the project
 config = SuperResConfig()

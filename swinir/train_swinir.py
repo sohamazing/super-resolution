@@ -16,7 +16,7 @@ sys.path.append(str(SCRIPT_DIR.parent))
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-from swinir.fused_swin_model import FusedSwinIR
+from swinir.fused_swinir_model import FusedSwinIR
 from utils.datasets import SuperResDataset
 from config import config
 
