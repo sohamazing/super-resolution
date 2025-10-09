@@ -59,7 +59,7 @@ class HCASTGenerator(nn.Module):
         self.bottleneck_conv = nn.Conv2d(features[-1], embed_dim, 1, 1, 0)
 
         self.swin_body = nn.Sequential(
-            *[SwinTransformerBlock(
+            *[SwinTransformer(
                 dim=embed_dim,
                 num_heads=num_heads,
                 window_size=window_size,
