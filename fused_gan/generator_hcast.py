@@ -8,7 +8,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
-from swinir.swin_transformer import SwinTransformerBlock
+from swinir.swin_transformer import SwinTransformer
 
 class ConvBlock(nn.Module):
     """Standard conv block with optional normalization."""
@@ -59,7 +59,7 @@ class HCASTGenerator(nn.Module):
         self.bottleneck_conv = nn.Conv2d(features[-1], embed_dim, 1, 1, 0)
 
         self.swin_body = nn.Sequential(
-            *[SwinTransformerBlock(
+            *[SwinTransformer(
                 dim=embed_dim,
                 num_heads=num_heads,
                 window_size=window_size,
