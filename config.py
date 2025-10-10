@@ -1,9 +1,13 @@
 # config.py
+import os
+import sys
 from pathlib import Path
 from dataclasses import dataclass, field
 import torch
-import os
-import sys
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+torch.backends.cudnn.benchmark = True
+
 
 class SuperResConfig:
     """A single source of truth for all model and training parameters."""

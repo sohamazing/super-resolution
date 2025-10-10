@@ -31,8 +31,11 @@ class HCASTGenerator(nn.Module):
     Hierarchical CNN-Attention Super-Resolution Transformer (H-CAST) Generator.
     Optimized version with memory-efficient skip connections and better stability.
     """
-    def __init__(self, in_channels=3, out_channels=3, features=[64, 128, 256],
-                 embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=6,
+    # def __init__(self, in_channels=3, out_channels=3, features=[64, 128, 256],
+    #              embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=6,
+    #              scale=4, dropout=0.1):
+    def __init__(self, in_channels=3, out_channels=3, features=[48, 96, 128],
+                 embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=4,
                  scale=4, dropout=0.1):
         super().__init__()
         self.scale = scale

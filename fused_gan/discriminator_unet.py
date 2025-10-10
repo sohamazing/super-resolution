@@ -38,7 +38,8 @@ class DiscriminatorUNet(nn.Module):
       up[3]: concat(32, skip_0:64) -> up to 64 -> refine
       final: 64 -> 32 -> output
     """
-    def __init__(self, in_channels=3, features=[64, 128, 256, 512]):
+    #def __init__(self, in_channels=3, features=[64, 128, 256, 512]):
+    def __init__(self, in_channels=3, features=[32, 64, 128, 256]):
         super().__init__()
 
         # --- Encoder (Downsampling Path) ---
