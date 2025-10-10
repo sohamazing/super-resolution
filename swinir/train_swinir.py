@@ -91,10 +91,10 @@ def main(args):
         lr_dir=config.DATA_DIR / "val" / "LR",
     )
 
-    train_loader = DataLoader(
-        train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-        num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda")
-    )
+    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
+                              num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda"),
+                              persistent_workers=(config.NUM_WORKERS > 0), 
+                              prefetch_factor=2 if config.NUM_WORKERS > 0 else None)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True)
 
     # Initialize our custom FusedSwinIR model

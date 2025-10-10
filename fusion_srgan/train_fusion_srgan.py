@@ -3,13 +3,14 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
+import torch.nn.functional as F
+import torchvision
 from tqdm import tqdm
 import wandb
 import argparse
 import sys
 from pathlib import Path
-import torchvision
-import torch.nn.functional as F
+
 import contextlib
 import re
 
@@ -205,24 +206,31 @@ def validate_one_epoch(gen, val_loader, autocast_context, ema=None):
 @torch.no_grad()
 def sample_and_log_images(gen, loader, epoch, autocast_context, ema=None):
     """
-    Generates a sample image from the validation set for visual inspection.
+    Generates a sample grid of [Bicubic | Generated | Ground Truth] for visual inspection.
     """
     gen.eval()
     if ema: ema.apply_shadow()
 
-    # Get a fresh batch from the validation loader each time
+    # Get a fresh batch from the validation loader
     lr, hr = next(iter(loader))
     lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
 
     with autocast_context:
         fake_hr = gen(lr)
+    
+    # Create a bicubic upscale for baseline comparison
+    bicubic = F.interpolate(lr, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
 
-    # Create a grid of [Generated | Ground Truth] for comparison
-    grid = torchvision.utils.make_grid(torch.cat([fake_hr, hr], dim=0), normalize=True, nrow=lr.size(0))
+    # Interleave the images to group them by sample
+    display_batch = []
+    for i in range(lr.size(0)): # Iterate through the batch size
+        display_batch.extend([bicubic[i], fake_hr[i], hr[i]])
+
+    # Create a grid with 3 columns
+    grid = torchvision.utils.make_grid(display_batch, normalize=True, nrow=3)
     wandb.log({"Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
-
-    if ema:
-        ema.restore()
+    
+    if ema: ema.restore()
     gen.train()
 
 def main(args):

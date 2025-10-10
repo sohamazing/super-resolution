@@ -3,6 +3,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
+import torch.nn.functional as F
 import torchvision.utils
 from torch.amp import autocast, GradScaler
 from pathlib import Path
@@ -38,9 +39,7 @@ def validate_one_epoch(model, loader, scheduler, loss_fn, device):
             t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=device).long()
             noise = torch.randn_like(hr_batch)
             noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
-            lr_upscaled = nn.functional.interpolate(
-                lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False
-            )
+            lr_upscaled = F.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
             predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
             total_val_loss += loss_fn(noise, predicted_noise).item()
     model.train()
@@ -55,16 +54,15 @@ def sample_and_log_images(model, scheduler, loader, epoch):
     lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
 
     img = torch.randn_like(hr_batch)
-    lr_upscaled = nn.functional.interpolate(
-        lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False
-    )
+    lr_upscaled = F.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
 
     for i in tqdm(reversed(range(0, scheduler.timesteps)), desc="Sampling", total=scheduler.timesteps, leave=False):
         t = torch.full((img.shape[0],), i, device=config.DEVICE, dtype=torch.long)
         predicted_noise = model(img, t, lr_upscaled)
         img = scheduler.sample_previous_timestep(img, t, predicted_noise)
 
-    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_batch], dim=1), normalize=True)
+    all_images = torch.cat([lr_upscaled, img, hr_batch], dim=0)
+    grid = torchvision.utils.make_grid(all_images, normalize=True, nrow=lr_batch.size(0))
     wandb.log({"validation_sample": wandb.Image(grid, caption=f"Epoch {epoch + 1}")})
     model.train()
 
@@ -76,7 +74,9 @@ def main(args):
     train_dataset = TrainDataset(hr_dir=config.DATA_DIR / "train" / "HR", lr_dir=config.DATA_DIR / "train" / "LR")
     val_dataset = ValDataset(hr_dir=config.DATA_DIR / "val" / "HR", lr_dir=config.DATA_DIR / "val" / "LR")
     train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
-                              num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda"))
+                              num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda"),
+                              persistent_workers=(config.NUM_WORKERS > 0), 
+                              prefetch_factor=2 if config.NUM_WORKERS > 0 else None)
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
     # --- Model + Optimizer ---
@@ -129,7 +129,7 @@ def main(args):
                 t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=config.DEVICE).long()
                 noise = torch.randn_like(hr_batch)
                 noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
-                lr_upscaled = nn.functional.interpolate(
+                lr_upscaled = F.interpolate(
                     lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False
                 )
                 predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
