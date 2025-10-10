@@ -54,10 +54,10 @@ class GeneratorESRGAN(nn.Module):
         self.conv_first = nn.Conv2d(in_channels, num_features, 3, 1, 1)
         self.body = nn.Sequential(*[RRDB(num_features) for _ in range(num_blocks)])
         self.conv_body = nn.Conv2d(num_features, num_features, 3, 1, 1)
-        
+
         # Two upsampling blocks for 4x scale
         self.upsample = nn.Sequential(UpsampleBlock(num_features), UpsampleBlock(num_features))
-        
+
         self.conv_hr = nn.Conv2d(num_features, num_features, 3, 1, 1)
         self.conv_last = nn.Conv2d(num_features, out_channels, 3, 1, 1)
         self.lrelu = nn.LeakyReLU(0.2, inplace=True)
@@ -66,7 +66,7 @@ class GeneratorESRGAN(nn.Module):
         feat = self.conv_first(x)
         trunk = self.conv_body(self.body(feat))
         feat = feat + trunk
-        
+
         feat = self.upsample(feat)
         out = self.conv_last(self.lrelu(self.conv_hr(feat)))
         return out

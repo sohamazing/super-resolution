@@ -55,7 +55,7 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss
             loss_disc_real = adv_loss(disc_real, torch.ones_like(disc_real))
             loss_disc_fake = adv_loss(disc_fake, torch.zeros_like(disc_fake))
             loss_disc = (loss_disc_real + loss_disc_fake) / 2
-        
+
         disc.zero_grad(set_to_none=True)
         scaler_d.scale(loss_disc).backward()
         scaler_d.step(opt_d)
@@ -68,7 +68,7 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss
             gen_l1_loss = l1_loss(fake, hr)
             gen_vgg_loss = vgg_loss(fake, hr)
             loss_gen = (config.LAMBDA_L1 * gen_l1_loss) + (config.LAMBDA_ADV * gen_adv_loss) + (config.LAMBDA_PERCEP * gen_vgg_loss)
-        
+
         gen.zero_grad(set_to_none=True)
         scaler_g.scale(loss_gen).backward()
         scaler_g.step(opt_g)
@@ -130,7 +130,7 @@ def main(args):
             # Pre-training loop implementation...
             torch.save(gen.state_dict(), pretrained_file)
         print(f"--- Pre-training Finished. Model saved to '{pretrained_file}' ---")
-    
+
     if args.mode in ["train", "all"] and start_epoch == 0 and pretrained_file.exists():
          print(f"--- Loading pre-trained generator from {pretrained_file} ---")
          gen.load_state_dict(torch.load(pretrained_file, map_location=config.DEVICE))
@@ -140,11 +140,11 @@ def main(args):
         print("\n--- Starting Main ESRGAN Training ---")
         for epoch in range(start_epoch, config.ESRGAN_EPOCHS):
             train_one_epoch(gen, disc, train_loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss, vgg_loss, adversarial_loss)
-            
+
             # --- Validation and Checkpointing ---
             avg_psnr = validate_one_epoch(gen, val_loader)
             print(f"Epoch {epoch+1} | Validation PSNR: {avg_psnr:.2f} dB")
-            
+
             wandb.log({"epoch": epoch + 1, "Validation/psnr": avg_psnr, "Train/lr": scheduler_g.get_last_lr()[0]})
             scheduler_g.step(); scheduler_d.step()
 

@@ -15,7 +15,7 @@ class ConvResidualBlock(nn.Module):
         self.gelu = nn.GELU()
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1)
         self.norm2 = nn.BatchNorm2d(out_channels)
-        
+
         # The shortcut connection ensures dimensions match for the residual addition.
         if stride != 1 or in_channels != out_channels:
             self.shortcut = nn.Sequential(
@@ -38,11 +38,11 @@ class CNNFeatureExtractor(nn.Module):
     """
     def __init__(self, in_channels=3, embed_dim=180, num_layers=4):
         super().__init__()
-        
+
         self.layers = nn.ModuleList()
         # The first layer maps the input image (e.g., 3 channels) to the main embedding dimension.
         self.layers.append(ConvResidualBlock(in_channels, embed_dim, stride=1))
-        
+
         # All subsequent layers process features while maintaining the same channel and spatial dimensions.
         for _ in range(num_layers - 1):
             self.layers.append(ConvResidualBlock(embed_dim, embed_dim, stride=1))
@@ -58,7 +58,7 @@ class CNNFeatureExtractor(nn.Module):
         return feature_maps
 
 # stride > 1 to extract features at lower resoltuions
-# 
+#
 # class CNNFeatureExtractorMultiRes(nn.Module):
 #     """
 #     A lightweight CNN to extract multi-scale features.
@@ -71,13 +71,13 @@ class CNNFeatureExtractor(nn.Module):
 #             ConvResidualBlock(in_channels, base_dim, stride=1),
 #             ConvResidualBlock(base_dim, base_dim, stride=1)
 #         )
-        
+
 #         # --- Stage 2: Half Resolution Features ---
 #         self.stage2 = nn.Sequential(
 #             ConvResidualBlock(base_dim, base_dim * 2, stride=2),
 #             ConvResidualBlock(base_dim * 2, base_dim * 2, stride=1)
 #         )
-        
+
 #         # --- Stage 3: Quarter Resolution Features ---
 #         self.stage3 = nn.Sequential(
 #             ConvResidualBlock(base_dim * 2, base_dim * 4, stride=2),

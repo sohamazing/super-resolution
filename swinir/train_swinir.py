@@ -44,10 +44,10 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler):
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
-        
+
         avg_loss += loss.item()
         loop.set_postfix(l1_loss=loss.item())
-        
+
     return avg_loss / len(loader)
 
 @torch.no_grad()
@@ -81,18 +81,18 @@ def sample_and_log_images(model, loader, epoch):
 def main(args):
     # Initialize Weights & Biases for experiment tracking
     wandb.init(project="SuperResolution-FusedSwinIR", config=vars(config), resume="allow", id=args.wandb_id)
-    
+
     train_dataset = TrainDataset(
-        hr_dir=config.DATA_DIR / "train" / "HR", 
+        hr_dir=config.DATA_DIR / "train" / "HR",
         lr_dir=config.DATA_DIR / "train" / "LR",
     )
     val_dataset = ValDataset(
-        hr_dir=config.DATA_DIR / "val" / "HR", 
+        hr_dir=config.DATA_DIR / "val" / "HR",
         lr_dir=config.DATA_DIR / "val" / "LR",
     )
 
     train_loader = DataLoader(
-        train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, 
+        train_dataset, batch_size=config.BATCH_SIZE, shuffle=True,
         num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda")
     )
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=True)
@@ -106,13 +106,13 @@ def main(args):
         num_blocks_per_layer=config.SWIN_NUM_BLOCKS_PER_LAYER,
         scale=config.SCALE
     ).to(config.DEVICE)
-    
+
     # AdamW is the standard, state-of-the-art optimizer for transformer-based models.
     optimizer = optim.AdamW(model.parameters(), lr=config.SWIN_LR, weight_decay=1e-2)
-    
+
     # L1 loss is a robust choice for image-to-image tasks, focusing on pixel-wise accuracy.
     loss_fn = nn.L1Loss()
-    
+
     # GradScaler is essential for stable mixed-precision training.
     scaler = GradScaler(device_type=config.DEVICE, enabled=(config.DEVICE != 'cpu'))
 
@@ -139,21 +139,21 @@ def main(args):
     print("--- Starting FusedSwinIR Training ---")
     for epoch in range(start_epoch, config.SWIN_EPOCHS):
         avg_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, scaler)
-        
+
         # --- Full Validation and Checkpointing Block ---
         avg_psnr = validate_one_epoch(model, val_loader)
         print(f"Epoch {epoch+1} | Train Loss: {avg_loss:.4f} | Validation PSNR: {avg_psnr:.2f} dB")
-        
+
         wandb.log({
-            "epoch": epoch + 1, 
-            "Train/loss": avg_loss, 
+            "epoch": epoch + 1,
+            "Train/loss": avg_loss,
             "Validation/psnr": avg_psnr,
             "Train/lr": scheduler.get_last_lr()[0]
         })
         scheduler.step()
-        
+
         sample_and_log_images(model, val_loader, epoch)
-        
+
         # Save best model
         if avg_psnr > best_psnr:
             best_psnr = avg_psnr

@@ -189,7 +189,7 @@ def validate_one_epoch(gen, val_loader, autocast_context, ema=None):
     """Calculates PSNR over the entire validation set for an accurate metric."""
     gen.eval()
     if ema: ema.apply_shadow()
-    
+
     total_psnr = 0
     for lr, hr in tqdm(val_loader, desc="Validating", leave=False):
         lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
@@ -197,7 +197,7 @@ def validate_one_epoch(gen, val_loader, autocast_context, ema=None):
             fake_hr = gen(lr)
             mse = F.mse_loss(fake_hr, hr)
             total_psnr += (10 * torch.log10(1 / mse)).item()
-            
+
     if ema: ema.restore()
     gen.train()
     return total_psnr / len(val_loader)
@@ -212,10 +212,10 @@ def sample_and_log_images(gen, val_loader, epoch, autocast_context, ema=None):
     lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
     with autocast_context:
         fake_hr = gen(lr)
-        
+
     grid = torchvision.utils.make_grid(torch.cat([fake_hr, hr], dim=0), normalize=True, nrow=lr.size(0))
     wandb.log({"Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
-    
+
     if ema: ema.restore()
     gen.train()
 

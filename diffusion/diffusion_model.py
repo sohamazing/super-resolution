@@ -68,116 +68,62 @@ class SelfAttention(nn.Module):
         return out.swapaxes(2, 1).contiguous().reshape(b, c, h, w)
 
 
-class DiffusionUNet_large(nn.Module):
+class DiffusionUNet(nn.Module):
     """A professional U-Net with Residual blocks, Self-Attention, and Conditioning."""
-    def __init__(self, in_channels=6, out_channels=3, time_emb_dim=32):
+    def __init__(self, in_channels=6, out_channels=3, features=[64, 128, 256], time_emb_dim=32):
         super().__init__()
-        
+
         # --- Time Embedding ---
         self.time_mlp = nn.Sequential(
             SinusoidalPositionEmbeddings(time_emb_dim),
             nn.Linear(time_emb_dim, time_emb_dim),
             nn.ReLU()
         )
-        
+
         # --- Encoder (Downsampling Path) ---
-        self.down1 = ResidualBlock(in_channels, 64, time_emb_dim)
-        self.down2 = ResidualBlock(64, 128, time_emb_dim)
+        self.down1 = ResidualBlock(in_channels, features[0], time_emb_dim)
+        self.down2 = ResidualBlock(features[0], features[1], time_emb_dim)
         self.pool = nn.MaxPool2d(2)
 
         # --- Bottleneck ---
-        self.bot1 = ResidualBlock(128, 256, time_emb_dim)
-        self.attention = SelfAttention(256)
-        self.bot2 = ResidualBlock(256, 256, time_emb_dim)
+        self.bot1 = ResidualBlock(features[1], features[2], time_emb_dim)
+        self.attention = SelfAttention(features[2])
+        self.bot2 = ResidualBlock(features[2], features[2], time_emb_dim)
 
         # --- Decoder (Upsampling Path) ---
         self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-        self.up1 = ResidualBlock(256 + 128, 128, time_emb_dim) # Input channels = upsampled + skip connection
-        self.up2 = ResidualBlock(128 + 64, 64, time_emb_dim)  # Input channels = upsampled + skip connection
-        
+        self.up1 = ResidualBlock(features[2] + features[1], features[1], time_emb_dim)
+        self.up2 = ResidualBlock(features[1] + features[0], features[0], time_emb_dim)
+
         # --- Final Output Layer ---
-        self.out = nn.Conv2d(64, out_channels, 1)
+        self.out = nn.Conv2d(features[0], out_channels, 1)
 
     def forward(self, x, t, lr_image):
         # Concatenate the noisy image with the upscaled LR image condition
         x = torch.cat([x, lr_image], dim=1)
-        
-        # 1. Process the timestep
+
+        # Process the timestep
         t = self.time_mlp(t)
-        
-        # 2. Go down the encoder path
+
+        # Go down the encoder path
         x1 = self.down1(x, t)  # Save for skip connection
         p1 = self.pool(x1)
         x2 = self.down2(p1, t) # Save for skip connection
         p2 = self.pool(x2)
-        
-        # 3. Pass through the bottleneck
+
+        # Pass through the bottleneck
         x3 = self.bot1(p2, t)
         x3 = self.attention(x3)
         x3 = self.bot2(x3, t)
-        
-        # 4. Go up the decoder path
+
+        # Go up the decoder path
         u1 = self.up(x3)
         u1 = torch.cat([u1, x2], dim=1) # Apply skip connection
         u1 = self.up1(u1, t)
-        
+
         u2 = self.up(u1)
         u2 = torch.cat([u2, x1], dim=1) # Apply skip connection
         u2 = self.up2(u2, t)
-        
-        # 5. Get the final prediction
-        return self.out(u2)
 
-class DiffusionUNet(nn.Module):
-    """A professional U-Net with Residual blocks, Self-Attention, and Conditioning."""
-    # Reduced channel dimensions and time embedding for a smaller, faster model.
-    def __init__(self, in_channels=6, out_channels=3, time_emb_dim=24): # Time embedding reduced from 32
-        super().__init__()
-        
-        # --- Time Embedding ---
-        self.time_mlp = nn.Sequential(
-            SinusoidalPositionEmbeddings(time_emb_dim),
-            nn.Linear(time_emb_dim, time_emb_dim),
-            nn.ReLU()
-        )
-        
-        # --- Encoder (Downsampling Path) ---
-        # Channels reduced: 64 -> 48
-        self.down1 = ResidualBlock(in_channels, 48, time_emb_dim)
-        # Channels reduced: 128 -> 96
-        self.down2 = ResidualBlock(48, 96, time_emb_dim)
-        self.pool = nn.MaxPool2d(2)
-
-        # --- Bottleneck ---
-        # Channels reduced: 256 -> 192
-        self.bot1 = ResidualBlock(96, 192, time_emb_dim)
-        self.attention = SelfAttention(192)
-        self.bot2 = ResidualBlock(192, 192, time_emb_dim)
-
-        # --- Decoder (Upsampling Path) ---
-        self.up = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
-        # Channels reduced: 256 + 128 -> 192 + 96 -> 96
-        self.up1 = ResidualBlock(192 + 96, 96, time_emb_dim) 
-        # Channels reduced: 128 + 64 -> 96 + 48 -> 48
-        self.up2 = ResidualBlock(96 + 48, 48, time_emb_dim)
-        
-        # --- Final Output Layer ---
-        self.out = nn.Conv2d(48, out_channels, 1)
-
-    def forward(self, x, t, lr_image):
-        x = torch.cat([x, lr_image], dim=1)
-        t = self.time_mlp(t)
-        x1 = self.down1(x, t)
-        p1 = self.pool(x1)
-        x2 = self.down2(p1, t)
-        p2 = self.pool(x2)
-        x3 = self.bot1(p2, t)
-        x3 = self.attention(x3)
-        x3 = self.bot2(x3, t)
-        u1 = self.up(x3)
-        u1 = torch.cat([u1, x2], dim=1)
-        u1 = self.up1(u1, t)
-        u2 = self.up(u1)
-        u2 = torch.cat([u2, x1], dim=1)
-        u2 = self.up2(u2, t)
+        # Get the final prediction
         return self.out(u2)

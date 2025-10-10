@@ -80,8 +80,12 @@ def main(args):
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
     # --- Model + Optimizer ---
-    model = DiffusionUNet().to(config.DEVICE)
-    scheduler = Scheduler(timesteps=config.TIMESTEPS)
+    model = DiffusionUNet(
+        features=config.DIFFUSION_FEATURES,
+        time_emb_dim=config.DIFFUSION_TIME_EMB_DIM
+    ).to(config.DEVICE)
+
+    scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS)
     optimizer = optim.Adam(model.parameters(), lr=config.DIFFUSION_LR)
     loss_fn = nn.L1Loss()
     scaler = GradScaler(enabled=(config.DEVICE == 'cuda'))

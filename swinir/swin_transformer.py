@@ -48,7 +48,7 @@ class WindowAttention(nn.Module):
 
         self.relative_position_bias_table = nn.Parameter(
             torch.zeros((2 * window_size - 1) * (2 * window_size - 1), num_heads))
-        
+
         coords_h = torch.arange(self.window_size)
         coords_w = torch.arange(self.window_size)
         coords = torch.stack(torch.meshgrid([coords_h, coords_w], indexing="ij"))
@@ -60,7 +60,7 @@ class WindowAttention(nn.Module):
         relative_coords[:, :, 0] *= 2 * self.window_size - 1
         relative_position_index = relative_coords.sum(-1)
         self.register_buffer("relative_position_index", relative_position_index)
-        
+
         self.to_qkv = nn.Linear(dim, dim * 3, bias=False)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
@@ -88,7 +88,7 @@ class WindowAttention(nn.Module):
             attn = F.softmax(attn, dim=-1)
 
         attn = self.attn_drop(attn)
-        
+
         x = (attn @ v).transpose(1, 2).reshape(B_, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
@@ -137,7 +137,7 @@ class SwinTransformer(nn.Module):
     def forward(self, x):
         B, H, W, C = x.shape
         shortcut = x
-        
+
         if self.shift_size > 0:
             self.attn_mask = self.create_mask(H, W, x.device)
 
@@ -160,7 +160,7 @@ class SwinTransformer(nn.Module):
             x = torch.roll(shifted_x, shifts=(self.shift_size, self.shift_size), dims=(1, 2))
         else:
             x = shifted_x
-        
+
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
         return x
@@ -173,7 +173,7 @@ class ResidualSwinTransformerLayer(nn.Module):
     """
     def __init__(self, dim, num_heads, window_size=8, num_blocks=6):
         super().__init__()
-        
+
         self.blocks = nn.ModuleList()
         for i in range(num_blocks):
             # Every other block uses a shifted window
@@ -186,7 +186,7 @@ class ResidualSwinTransformerLayer(nn.Module):
                     shift_size=shift_size
                 )
             )
-            
+
         # A final convolutional layer for the residual connection
         self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
 
@@ -195,15 +195,15 @@ class ResidualSwinTransformerLayer(nn.Module):
         # Assuming input x is (B, C, H, W), we permute it
         B, C, H, W = x.shape
         shortcut = x
-        
+
         x = x.permute(0, 2, 3, 1) # (B, H, W, C)
-        
+
         for block in self.blocks:
             x = block(x)
-        
+
         # Permute back to (B, C, H, W) for the convolutional layer
         x = x.permute(0, 3, 1, 2)
         x = self.conv(x)
-        
+
         # Add the main residual connection
         return shortcut + x

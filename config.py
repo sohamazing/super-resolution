@@ -30,38 +30,40 @@ class SuperResConfig:
     PATCH_SIZE: int = 256
     STEP: int = 128
     SCALE: int = 4
-    HR_CROP_SIZE = PATCH_SIZE
-    LR_CROP_SIZE = PATCH_SIZE // SCALE
+    HR_CROP_SIZE: int = PATCH_SIZE
+    LR_CROP_SIZE: int = PATCH_SIZE // SCALE
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
 
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
     BATCH_SIZE: int = 8 if sys.platform == "darwin" else 16
-    CHECKPOINT_INTERVAL = 1 # in epochs
+    CHECKPOINT_INTERVAL: int = 1 # in epochs
     PRETRAIN_EPOCHS: int = 10
 
     # --- Diffusion Specific ---
     DIFFUSION_EPOCHS: int = 1000
     DIFFUSION_LR: float = 2e-4
-    TIMESTEPS: int = 1000
+    DIFFUSION_TIMESTEPS: int = 1000
+    DIFFUSION_TIME_EMB_DIM: int = 24 # larger = 32
+    DIFFUSION_FEATURES: list = field(default_factory=lambda: [48, 96, 192]) # larger = [64, 128, 256]
 
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 1000
     ESRGAN_LR: float = 2e-4
-    ESRGAN_NUM_FEATURES = 64
-    ESRGAN_NUM_RRDB = 23
+    ESRGAN_NUM_FEATURES: int = 64
+    ESRGAN_NUM_RRDB: int = 23
 
     # --- Fusion-SRGAN Specific ---
     FUSION_SRGAN_EPOCHS: int = 1000
     FUSION_SRGAN_LR: float = 2e-4 # 1e-4
-    FUSION_SRGAN_GEN_FEATURES = [48, 96, 128] # larger = [64, 128, 256]
-    FUSION_SRGAN_DIS_FEATURES = [32, 64, 128, 256] # larger = [64, 128, 256, 512]
-    FUSION_SRGAN_EMBED_DIM = 180
-    FUSION_SRGAN_NUM_HEADS = 6 # num attention heads
-    FUSION_SRGAN_WINDOW_SIZE = 8
-    FUSION_SRGAN_NUM_SWIN_BLOCKS = 4 # larger = 6
-    FUSION_SRGAN_DROPOUT = 0.1
+    FUSION_SRGAN_GEN_FEATURES: list = field(default_factory=lambda: [48, 96, 128]) # larger = [64, 128, 256]
+    FUSION_SRGAN_DIS_FEATURES: list = field(default_factory=lambda: [32, 64, 128, 256]) # larger = [64, 128, 256, 512]
+    FUSION_SRGAN_EMBED_DIM: int = 180
+    FUSION_SRGAN_NUM_HEADS: int = 6 # num attention heads
+    FUSION_SRGAN_WINDOW_SIZE: int = 8
+    FUSION_SRGAN_NUM_SWIN_BLOCKS: int = 4 # larger = 6
+    FUSION_SRGAN_DROPOUT: float = 0.1
 
     # --- Loss Specific ---
     LAMBDA_L1: float = 1.0

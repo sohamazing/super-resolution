@@ -24,22 +24,22 @@ class FusedSwinIR(nn.Module):
     """
     The final, professionally implemented Fused-Scale SwinIR model for 4x Super-Resolution.
     """
-    def __init__(self, in_channels=3, out_channels=3, embed_dim=180, num_heads=6, 
+    def __init__(self, in_channels=3, out_channels=3, embed_dim=180, num_heads=6,
                  window_size=8, num_layers=4, num_blocks_per_layer=6, scale=4):
         super().__init__()
         self.scale = scale
-        
+
         # --- 1. Shallow Feature Extraction (for Transformer path) ---
         self.conv_first = nn.Conv2d(in_channels, embed_dim, 3, 1, 1)
-        
+
         # --- 2. Parallel CNN Feature Extraction ---
         # This now correctly uses the refined CNN extractor.
         self.cnn_extractor = CNNFeatureExtractor(in_channels=in_channels, embed_dim=embed_dim, num_layers=num_layers)
-        
+
         # --- 3. Deep Feature Extraction & Fusion ---
         self.transformer_body = nn.ModuleList()
         self.fusion_blocks = nn.ModuleList()
-        
+
         for _ in range(num_layers):
             self.transformer_body.append(
                 ResidualSwinTransformerLayer(
@@ -48,10 +48,10 @@ class FusedSwinIR(nn.Module):
             )
             # The FusionBlock is now simpler as all features have the same dimension.
             self.fusion_blocks.append(FusionBlock(dim=embed_dim))
-            
+
         # This layer processes the features after the final fusion has occurred.
         self.conv_after_fusion = nn.Conv2d(embed_dim, embed_dim, 3, 1, 1)
-            
+
         # --- 4. High-Resolution Reconstruction ---
         self.upsample = nn.Sequential(
             nn.Conv2d(embed_dim, out_channels * (scale ** 2), 3, 1, 1),
@@ -62,17 +62,17 @@ class FusedSwinIR(nn.Module):
         # A bicubic upsampling of the input serves as a baseline for the final residual connection.
         # This helps stabilize training and allows the model to focus on learning the high-frequency details.
         shortcut = F.interpolate(x, scale_factor=self.scale, mode='bicubic', align_corners=False)
-        
+
         # The CNN and Transformer paths run in parallel.
         cnn_features = self.cnn_extractor(x)
         trans_features = self.conv_first(x)
-        
+
         # The core loop: process with transformer, then fuse with corresponding CNN feature.
         for i in range(len(self.transformer_body)):
             trans_features = self.transformer_body[i](trans_features)
             trans_features = self.fusion_blocks[i](trans_features, cnn_features[i])
-        
+
         fused_features = self.conv_after_fusion(trans_features)
-        
+
         # The model's output is added to the bicubic shortcut to produce the final image.
         return self.upsample(fused_features) + shortcut
