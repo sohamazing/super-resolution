@@ -29,6 +29,7 @@ import torchvision.transforms.functional as TF
 from tqdm import tqdm
 from PIL import Image
 import argparse
+from typing import Optional
 import sys
 
 # --- Project Setup ---
@@ -40,34 +41,59 @@ from config import config
 from diffusion.diffusion_model import DiffusionUNet
 from esrgan.generator import GeneratorESRGAN
 from fusion_srgan.generator_swinunet import SwinUNetGenerator
-from swinir.fused_swinir import FusedSwinIR
+from swinir.fused_swinir_model import FusedSwinIR
 
 # ==================================
 # MODEL REGISTRY
 # ==================================
 MODEL_REGISTRY = {
     "fusion_srgan": {
-        "class": SwinUNetGenerator, # "class": SwinUNetGenerator_lite
-        "args": {},
-        "checkpoint_dir": ROOT_DIR / "fusion_srgan" / "checkpoints", 
+        "class": SwinUNetGenerator,
+        "args": {
+            "features": config.FUSION_SRGAN_GEN_FEATURES,
+            "embed_dim": config.FUSION_SRGAN_EMBED_DIM,
+            "num_heads": config.FUSION_SRGAN_NUM_HEADS,
+            "window_size": config.FUSION_SRGAN_WINDOW_SIZE,
+            "num_swin_blocks": config.FUSION_SRGAN_NUM_SWIN_BLOCKS,
+            "scale": config.SCALE,
+            "dropout": config.FUSION_SRGAN_DROPOUT,
+        },
+        "description": "Hybrid CNN U-Net with a Swin Transformer bottleneck, trained as a GAN.",
+        "checkpoint_dir": ROOT_DIR / "fusion_srgan" / "checkpoints",
         "best_filename": "best_generator.pth"
     },
     "diffusion": {
-        "class": DiffusionUNet, # "class": DiffusionUNet_large
-        "args": {}, 
-        "checkpoint_dir": ROOT_DIR / "diffusion" / "checkpoints", 
+        "class": DiffusionUNet,
+        "args": {
+            "features": config.DIFFUSION_FEATURES,
+            "time_emb_dim": config.DIFFUSION_TIME_EMB_DIM,
+        },
+        "description": "Denoising Diffusion Probabilistic Model (DDPM) using a U-Net to predict noise.",
+        "checkpoint_dir": ROOT_DIR / "diffusion" / "checkpoints",
         "best_filename": "best_model.pth"
     },
     "esrgan": {
-        "class": GeneratorESRGAN,
-        "args": {}, # "args": {'num_features': 64, 'num_blocks': 23}
-        "checkpoint_dir": ROOT_DIR / "esrgan" / "checkpoints", 
+        "class": GeneratorESRGAN, # Assuming this is the correct class name from your esrgan/generator.py
+        "args": {
+            "num_features": config.ESRGAN_NUM_FEATURES,
+            "num_blocks": config.ESRGAN_NUM_RRDB,
+        },
+        "description": "Classic ESRGAN architecture using Residual-in-Residual Dense Blocks (RRDBs).",
+        "checkpoint_dir": ROOT_DIR / "esrgan" / "checkpoints",
         "best_filename": "best_generator.pth"
     },
     "swinir": {
         "class": FusedSwinIR,
-        "args": {},
-        "checkpoint_dir": ROOT_DIR / "swinir" / "checkpoints", 
+        "args": {
+            "embed_dim": config.SWIN_EMBED_DIM,
+            "num_heads": config.SWIN_NUM_HEADS,
+            "window_size": config.SWIN_WINDOW_SIZE,
+            "num_layers": config.SWIN_NUM_LAYERS,
+            "num_blocks_per_layer": config.SWIN_NUM_BLOCKS_PER_LAYER,
+            "scale": config.SCALE,
+        },
+        "description": "Swin Transformer with parallel CNN feature fusion for deep feature extraction.",
+        "checkpoint_dir": ROOT_DIR / "swinir" / "checkpoints",
         "best_filename": "best_model.pth"
     },
 }
@@ -144,7 +170,7 @@ class SuperResolutionInference:
     def _infer_diffusion(self, lr_tensor: torch.Tensor) -> torch.Tensor:
         """CRITICAL: Inference using the special denoising loop for diffusion models."""
         from diffusion.scheduler import Scheduler
-        scheduler = Scheduler(timesteps=config.TIMESTEPS)
+        scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS)
         
         output_shape = (1, 3, lr_tensor.shape[2] * config.SCALE, lr_tensor.shape[3] * config.SCALE)
         img = torch.randn(output_shape, device=self.device)

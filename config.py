@@ -21,8 +21,8 @@ class SuperResConfig:
         Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_valid_HR"
     ])
     DATA_DIR: Path = Path("div2K-flickr2K-data") # relative local path
-    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2K-flickr2K-data") # absolute path
-    # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/div2K-flickr2K-data") # for external drive
+    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/data") # absolute path
+    # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/data") # for external drive
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
     VAL_SPLIT: float = 0.1
 
