@@ -8,7 +8,7 @@ torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 torch.backends.cudnn.benchmark = True
 
-
+@dataclass
 class SuperResConfig:
     """A single source of truth for all model and training parameters."""
 
