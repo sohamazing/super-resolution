@@ -18,8 +18,8 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
 # --- Import all our custom components ---
-from fused_gan.generator_swinunet import SwinUNetGenerator
-from fused_gan.discriminator_unet import DiscriminatorUNet
+from fusion_srgan.generator_swinunet import SwinUNetGenerator
+from fusion_srgan.discriminator_unet import DiscriminatorUNet
 from utils.loss import FusedGANLoss
 from utils.datasets import TrainDataset, ValDataset
 from config import config
@@ -221,7 +221,7 @@ def sample_and_log_images(gen, val_loader, epoch, autocast_context, ema=None):
 
 def main(args):
     wandb.init(
-        project="SuperResolution-FusedGAN", config=vars(config),
+        project="SuperResolution-FusionSRGAN", config=vars(config),
         resume="allow" if args.wandb_id else None, id=args.wandb_id
     )
 
