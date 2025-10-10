@@ -60,7 +60,7 @@ class Scheduler:
 
         # Get the variance and add a small amount of random noise (except for the last step)
         posterior_variance_t = self._get_index_from_list(self.posterior_variance, t, x_t.shape)
-        if t == 0:
+        if t[0].item() == 0:
             return model_mean
         else:
             noise = torch.randn_like(x_t)
