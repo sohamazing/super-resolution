@@ -1,4 +1,4 @@
-# fused_gan/discriminator_unet.py
+# fusion_srgan/discriminator_unet.py
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -38,8 +38,7 @@ class DiscriminatorUNet(nn.Module):
       up[3]: concat(32, skip_0:64) -> up to 64 -> refine
       final: 64 -> 32 -> output
     """
-    #def __init__(self, in_channels=3, features=[64, 128, 256, 512]):
-    def __init__(self, in_channels=3, features=[32, 64, 128, 256]):
+    def __init__(self, in_channels=3, features=config.FUSION_SRGAN_DIS_FEATURES):
         super().__init__()
 
         # --- Encoder (Downsampling Path) ---
@@ -160,7 +159,7 @@ def test_discriminator():
     batch_size = 16
     
     for size in test_sizes:
-        print(f"\n📊 Testing with input size: {size}x{size}")
+        print(f"\nTesting with input size: {size}x{size}")
         test_input = torch.randn(batch_size, 3, size, size).to(device)
         
         try:

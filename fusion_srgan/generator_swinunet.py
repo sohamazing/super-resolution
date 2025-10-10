@@ -1,4 +1,4 @@
-# # fused_gan/generator_hcast.py
+# fusion_srgan/generator_swinunet.py
 import torch
 from torch import nn
 import torch.nn.functional as F
@@ -26,14 +26,12 @@ class ConvBlock(nn.Module):
     def forward(self, x):
         return self.conv(x)
 
-class HCASTGenerator(nn.Module):
+
+class SwinUNetGenerator(nn.Module):
     """
-    Hierarchical CNN-Attention Super-Resolution Transformer (H-CAST) Generator.
-    Optimized version with memory-efficient skip connections and better stability.
+    A U-Net Generator with a Swin Transformer bottleneck for Super-Resolution.
+    Features a CNN encoder/decoder and skip connections for robust feature fusion.
     """
-    # def __init__(self, in_channels=3, out_channels=3, features=[64, 128, 256],
-    #              embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=6,
-    #              scale=4, dropout=0.1):
     def __init__(self, in_channels=3, out_channels=3, features=[48, 96, 128],
                  embed_dim=180, num_heads=6, window_size=8, num_swin_blocks=4,
                  scale=4, dropout=0.1):
@@ -148,9 +146,10 @@ class HCASTGenerator(nn.Module):
 
 
 # ===== Memory-efficient version with gradient checkpointing =====
-class HCASTGeneratorCheckpoint(HCASTGenerator):
+class SwinUNetGenerator_lite(SwinUNetGenerator):
     """
-    Version with gradient checkpointing for even lower memory usage.
+    Gradient checkpointing version of SwinUNetGenerator for lower memory usage.
+    Trades computation for memory, ideal for training with large inputs or limited VRAM.
     Use this if you're hitting OOM errors.
     """
     def __init__(self, *args, **kwargs):

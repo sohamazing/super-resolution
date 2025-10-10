@@ -3,50 +3,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .swin_transformer import SwinTransformer
+from .swin_transformer import SwinTransformer, ResidualSwinTransformerLayer
 from .cnn_feature_extractor import CNNFeatureExtractor
-
-class ResidualSwinTransformerLayer(nn.Module):
-    """
-    A layer of Swin Transformer blocks, composed of sequential blocks
-    with alternating regular (W-MSA) and shifted (SW-MSA) windows.
-    """
-    def __init__(self, dim, num_heads, window_size=8, num_blocks=6):
-        super().__init__()
-        
-        self.blocks = nn.ModuleList()
-        for i in range(num_blocks):
-            # Every other block uses a shifted window
-            shift_size = window_size // 2 if (i % 2 != 0) else 0
-            self.blocks.append(
-                SwinTransformer(
-                    dim=dim,
-                    num_heads=num_heads,
-                    window_size=window_size,
-                    shift_size=shift_size
-                )
-            )
-            
-        # A final convolutional layer for the residual connection
-        self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
-
-    def forward(self, x):
-        # The SwinTransformerBlock expects (B, H, W, C)
-        # Assuming input x is (B, C, H, W), we permute it
-        B, C, H, W = x.shape
-        shortcut = x
-        
-        x = x.permute(0, 2, 3, 1) # (B, H, W, C)
-        
-        for block in self.blocks:
-            x = block(x)
-        
-        # Permute back to (B, C, H, W) for the convolutional layer
-        x = x.permute(0, 3, 1, 2)
-        x = self.conv(x)
-        
-        # Add the main residual connection
-        return shortcut + x
 
 class FusionBlock(nn.Module):
     """

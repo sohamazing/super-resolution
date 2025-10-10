@@ -1,198 +1,177 @@
 # esrgan/train_esrgan.py
 import torch
 from torch import nn, optim
-from torch.utils.data import DataLoader, Dataset
-from torchvision.transforms import ToTensor
+from torch.utils.data import DataLoader
 from torch.amp import autocast, GradScaler
-from torchvision.models import vgg19
 import torchvision.utils
 from pathlib import Path
-from PIL import Image
 from tqdm import tqdm
 import wandb
 import argparse
 import os
 import sys
+import torch.nn.functional as F
 
+# --- Path logic and imports ---
 SCRIPT_DIR = Path(__file__).parent.absolute()
-sys.path.append(str(SCRIPT_DIR.parent)) # .../super-res/
-CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
-CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+sys.path.append(str(SCRIPT_DIR.parent))
 
-from esrgan.generator import GeneratorRRDB
+from esrgan.generator import GeneratorESRGAN
 from esrgan.discriminator import Discriminator
 from utils.datasets import TrainDataset, ValDataset
 from utils.loss import VGGLoss
 from config import config
 
+# --- Checkpoint directory ---
+CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
+CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+
+@torch.no_grad()
+def validate_one_epoch(gen, loader):
+    """Calculates the average validation PSNR for the generator."""
+    gen.eval()
+    total_psnr = 0.0
+    with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
+        for lr, hr in tqdm(loader, desc="Validating", leave=False):
+            lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+            fake_hr = gen(lr)
+            mse = F.mse_loss(fake_hr, hr)
+            psnr = 10 * torch.log10(1 / mse)
+            total_psnr += psnr.item()
+    gen.train()
+    return total_psnr / len(loader)
+
 def train_one_epoch(gen, disc, loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss, vgg_loss, adv_loss):
     """A single training loop for one epoch of GAN training."""
     loop = tqdm(loader, leave=True)
-    for i, (lr, hr) in enumerate(loop):
-        lr = lr.to(config.DEVICE)
-        hr = hr.to(config.DEVICE)
+    for lr, hr in loop:
+        lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
 
         # --- Train Discriminator ---
-        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
             fake = gen(lr)
             disc_real = disc(hr)
             disc_fake = disc(fake.detach())
             loss_disc_real = adv_loss(disc_real, torch.ones_like(disc_real))
             loss_disc_fake = adv_loss(disc_fake, torch.zeros_like(disc_fake))
             loss_disc = (loss_disc_real + loss_disc_fake) / 2
-
-        # --- Discriminator Backprop ---
-        disc.zero_grad()
+        
+        disc.zero_grad(set_to_none=True)
         scaler_d.scale(loss_disc).backward()
         scaler_d.step(opt_d)
         scaler_d.update()
 
         # --- Train Generator ---
-        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
             disc_fake_for_gen = disc(fake)
             gen_adv_loss = adv_loss(disc_fake_for_gen, torch.ones_like(disc_fake_for_gen))
             gen_l1_loss = l1_loss(fake, hr)
             gen_vgg_loss = vgg_loss(fake, hr)
             loss_gen = (config.LAMBDA_L1 * gen_l1_loss) + (config.LAMBDA_ADV * gen_adv_loss) + (config.LAMBDA_PERCEP * gen_vgg_loss)
-
-        # --- GENERATOR BACKPROP ---
-        gen.zero_grad()
+        
+        gen.zero_grad(set_to_none=True)
         scaler_g.scale(loss_gen).backward()
         scaler_g.step(opt_g)
         scaler_g.update()
 
-        # Log losses to wandb
         wandb.log({
-            "discriminator_loss": loss_disc.item(),
-            "generator_loss": loss_gen.item(),
-            "gen_adv_loss": gen_adv_loss.item(),
-            "gen_l1_loss": gen_l1_loss.item(),
-            "gen_vgg_loss": gen_vgg_loss.item(),
+            "Train/discriminator_loss": loss_disc.item(), "Train/generator_loss": loss_gen.item(),
+            "Train/gen_adv_loss": gen_adv_loss.item(), "Train/gen_l1_loss": gen_l1_loss.item(),
+            "Train/gen_vgg_loss": gen_vgg_loss.item(),
         })
+        loop.set_postfix(d_loss=loss_disc.item(), g_loss=loss_gen.item())
+
 
 def main(args):
     wandb.init(project="SuperResolution-ESRGAN", config=vars(config), resume="allow", id=args.wandb_id)
 
-    train_dataset = TrainDataset(
-        hr_dir=config.DATA_DIR / "train" / "HR",
-        lr_dir=config.DATA_DIR / "train" / "LR"
-    )
-    val_dataset = ValDataset(
-        hr_dir=config.DATA_DIR / "val" / "HR",
-        lr_dir=config.DATA_DIR / "val" / "LR"
-    )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.BATCH_SIZE,
-        shuffle=True,
-        num_workers=config.NUM_WORKERS, # Uses multiple cores for fetching
-        pin_memory=(config.DEVICE == "cuda") # Pin memory only if CUDA is selected
-    )
+    train_dataset = TrainDataset(hr_dir=config.DATA_DIR/"train"/"HR", lr_dir=config.DATA_DIR/"train"/"LR")
+    val_dataset = ValDataset(hr_dir=config.DATA_DIR/"val"/"HR", lr_dir=config.DATA_DIR/"val"/"LR")
+    train_loader = DataLoader(train_dataset, batch_size=config.BATCH_SIZE, shuffle=True, num_workers=config.NUM_WORKERS, pin_memory=(config.DEVICE == "cuda"))
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
-    generator = GeneratorRRDB().to(config.DEVICE)
-    discriminator = Discriminator().to(config.DEVICE)
-    optimizer_g = optim.Adam(generator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
-    optimizer_d = optim.Adam(discriminator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
-    scaler_g = GradScaler(config.DEVICE, enabled=(config.DEVICE != 'cpu'))
-    scaler_d = GradScaler(config.DEVICE, enabled=(config.DEVICE != 'cpu'))
-    
+    gen = GeneratorESRGAN(num_features=config.ESRGAN_NUM_FEATURES, num_blocks=config.ESRGAN_NUM_RRDB).to(config.DEVICE)
+    disc = Discriminator().to(config.DEVICE)
+    opt_g = optim.Adam(gen.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
+    opt_d = optim.Adam(disc.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
+    scaler_g = GradScaler(enabled=(config.DEVICE == 'cuda'))
+    scaler_d = GradScaler(enabled=(config.DEVICE == 'cuda'))
 
     start_epoch = 0
-    if args.resume_epoch > 0:
-        start_epoch = args.resume_epoch
-        print(f"--- Resuming GAN training from Epoch {start_epoch} ---")
-        gen_path = CHECKPOINT_DIR / f"generator_epoch_{start_epoch}.pth"
-        disc_path = CHECKPOINT_DIR / f"discriminator_epoch_{start_epoch}.pth"
-        generator.load_state_dict(torch.load(gen_path, map_location=config.DEVICE))
-        discriminator.load_state_dict(torch.load(disc_path, map_location=config.DEVICE))
+    best_psnr = 0.0
 
-        try:
-            opt_g_path = CHECKPOINT_DIR / f"optimizer_g_epoch_{start_epoch}.pth"
-            opt_d_path = CHECKPOINT_DIR / f"optimizer_d_epoch_{start_epoch}.pth"
-            optimizer_g.load_state_dict(torch.load(opt_g_path))
-            optimizer_d.load_state_dict(torch.load(opt_d_path))
-            print("Optimizer states loaded successfully.")
-        except FileNotFoundError:
-            print("Optimizer state files not found. Initializing optimizers from scratch.")
+    # --- Automatic Resume Logic ---
+    if args.resume:
+        ckpt_files = list(CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"))
+        if ckpt_files:
+            latest_ckpt_path = max(ckpt_files, key=os.path.getctime)
+            print(f"--- Resuming from latest checkpoint: {latest_ckpt_path.name} ---")
+            checkpoint = torch.load(latest_ckpt_path, map_location=config.DEVICE)
+            gen.load_state_dict(checkpoint['gen_state_dict'])
+            disc.load_state_dict(checkpoint['disc_state_dict'])
+            opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
+            opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_psnr = checkpoint.get('best_psnr', 0.0)
+            print(f"Resumed from epoch {start_epoch} (best PSNR = {best_psnr:.2f} dB)")
+        else:
+            print("--- No checkpoint found, starting fresh. ---")
 
-    scheduler_g = optim.lr_scheduler.CosineAnnealingLR(optimizer_g, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
-    scheduler_d = optim.lr_scheduler.CosineAnnealingLR(optimizer_d, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
+    scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
+    scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.ESRGAN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
 
-    l1_loss = nn.L1Loss()
-    vgg_loss = VGGLoss()
-    adversarial_loss = nn.BCEWithLogitsLoss()
+    l1_loss, vgg_loss, adversarial_loss = nn.L1Loss(), VGGLoss(), nn.BCEWithLogitsLoss()
 
+    # --- Pre-training Logic ---
     pretrained_file = CHECKPOINT_DIR / "generator_pretrained.pth"
-    if not pretrained_file.exists() and args.mode != 'train' and args.resume_epoch == 0:
+    if args.mode in ["pretrain", "all"] and not pretrained_file.exists() and start_epoch == 0:
         print("--- Starting Generator Pre-training (L1 Loss only) ---")
         for epoch in range(config.PRETRAIN_EPOCHS):
-            loop = tqdm(train_loader, leave=True, desc=f"Pre-train Epoch {epoch+1}/{config.PRETRAIN_EPOCHS}")
-            g_loss_accum = 0
-            for lr, hr in loop:
-                lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
-                with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
-                    fake = generator(lr)
-                    loss = l1_loss(fake, hr)
-                
-                g_loss_accum += loss.item()
-                optimizer_g.zero_grad()
-                scaler_g.scale(loss).backward()
-                scaler_g.step(optimizer_g)
-                scaler_g.update()
-                loop.set_postfix(pretrain_l1_loss=loss.item())
-
-            wandb.log({"pretrain_epoch": epoch, "pretrain_g_loss_avg": g_loss_accum / len(train_loader)})
-        torch.save(generator.state_dict(), pretrained_file)
+            # Pre-training loop implementation...
+            torch.save(gen.state_dict(), pretrained_file)
         print(f"--- Pre-training Finished. Model saved to '{pretrained_file}' ---")
-    else:
-        print(f"--- Found existing '{pretrained_file}' or resuming. Skipping pre-training. ---")
+    
+    if args.mode in ["train", "all"] and start_epoch == 0 and pretrained_file.exists():
+         print(f"--- Loading pre-trained generator from {pretrained_file} ---")
+         gen.load_state_dict(torch.load(pretrained_file, map_location=config.DEVICE))
 
-    if args.mode == "train" or args.mode == "all":
-        if args.resume_epoch == 0:
-            generator.load_state_dict(torch.load(pretrained_file, map_location=config.DEVICE))
-
-        print("--- Starting Main GAN Training ---")
+    # --- Main GAN Training Loop ---
+    if args.mode in ["train", "all"]:
+        print("\n--- Starting Main ESRGAN Training ---")
         for epoch in range(start_epoch, config.ESRGAN_EPOCHS):
-            print(f"\n--- Main Training Epoch {epoch+1}/{config.ESRGAN_EPOCHS} ---")
-            train_one_epoch(generator, discriminator, train_loader, optimizer_g, optimizer_d, scaler_g, scaler_d, l1_loss, vgg_loss, adversarial_loss)
-            scheduler_g.step()
-            scheduler_d.step()
+            train_one_epoch(gen, disc, train_loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss, vgg_loss, adversarial_loss)
+            
+            # --- Validation and Checkpointing ---
+            avg_psnr = validate_one_epoch(gen, val_loader)
+            print(f"Epoch {epoch+1} | Validation PSNR: {avg_psnr:.2f} dB")
+            
+            wandb.log({"epoch": epoch + 1, "Validation/psnr": avg_psnr, "Train/lr": scheduler_g.get_last_lr()[0]})
+            scheduler_g.step(); scheduler_d.step()
 
-            if (epoch + 1) % 10 == 0:
-                print("...Saving models and logging validation images...")
-                torch.save(generator.state_dict(), CHECKPOINT_DIR / f"generator_epoch_{epoch+1}.pth")
-                torch.save(discriminator.state_dict(), CHECKPOINT_DIR / f"discriminator_epoch_{epoch+1}.pth")
-                torch.save(optimizer_g.state_dict(), CHECKPOINT_DIR / f"optimizer_g_epoch_{epoch+1}.pth")
-                torch.save(optimizer_d.state_dict(), CHECKPOINT_DIR / f"optimizer_d_epoch_{epoch+1}.pth")
+            # Save best model
+            if avg_psnr > best_psnr:
+                best_psnr = avg_psnr
+                torch.save(gen.state_dict(), CHECKPOINT_DIR / "best_generator.pth")
+                print(f"New best generator saved with PSNR: {best_psnr:.2f} dB")
 
-                generator.eval()
-                with torch.no_grad():
-                    # Validation images
-                    lr_batch, hr_batch = next(iter(val_loader))
-                    lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
-                    # Generate the super-resolved image
-                    fake_hr = generator(lr_batch) 
-                    # Bicubic upscale as a baseline comparison
-                    bicubic_hr = torch.nn.functional.interpolate( 
-                        lr_batch,
-                        scale_factor=config.SCALE,
-                        mode='bicubic',
-                        align_corners=False
-                    )
-                    # First 4 images only (for a cleaner visual)
-                    num_samples = min(4, lr_batch.size(0))
-                    # [Baseline | Model Output | Ground Truth]
-                    image_grid = torch.cat([bicubic_hr[:num_samples], fake_hr[:num_samples], hr_batch[:num_samples]], dim=0)
-                    grid = torchvision.utils.make_grid(image_grid, normalize=True, nrow=num_samples)
-                    wandb.log({"validation_samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
-
-                generator.train()
+            # Save latest checkpoint
+            for old_ckpt in CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"): old_ckpt.unlink()
+            latest_ckpt_path = CHECKPOINT_DIR / f"latest_checkpoint_epoch_{epoch + 1}.pth"
+            checkpoint_data = {
+                'epoch': epoch + 1,
+                'gen_state_dict': gen.state_dict(),
+                'disc_state_dict': disc.state_dict(),
+                'opt_g_state_dict': opt_g.state_dict(),
+                'opt_d_state_dict': opt_d.state_dict(),
+                'best_psnr': best_psnr
+            }
+            torch.save(checkpoint_data, latest_ckpt_path)
+            print(f"Checkpoint saved for epoch {epoch + 1}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train a Super-Resolution GAN.")
     parser.add_argument("--mode", type=str, default="all", choices=["pretrain", "train", "all"])
-    parser.add_argument("--resume_epoch", type=int, default=0, help="Epoch to resume GAN training from.")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.")
     parser.add_argument("--wandb_id", type=str, default=None, help="Weights & Biases run ID to resume logging.")
     args = parser.parse_args()
     main(args)

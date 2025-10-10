@@ -40,7 +40,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler):
             loss = loss_fn(sr, hr)
 
         # Backpropagation with GradScaler
-        optimizer.zero_grad()
+        optimizer.zero_grad(set_to_none=True)
         scaler.scale(loss).backward()
         scaler.step(optimizer)
         scaler.update()
@@ -49,6 +49,34 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler):
         loop.set_postfix(l1_loss=loss.item())
         
     return avg_loss / len(loader)
+
+@torch.no_grad()
+def validate_one_epoch(model, loader):
+    """Calculates the average validation PSNR for the model."""
+    model.eval()
+    total_psnr = 0.0
+    with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
+        for lr, hr in tqdm(loader, desc="Validating", leave=False):
+            lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+            sr = model(lr)
+            mse = F.mse_loss(sr, hr)
+            psnr = 10 * torch.log10(1 / mse)
+            total_psnr += psnr.item()
+    model.train()
+    return total_psnr / len(loader)
+
+@torch.no_grad()
+def sample_and_log_images(model, loader, epoch):
+    """Logs a visual sample of [Bicubic | Generated | Ground Truth]."""
+    model.eval()
+    lr, hr = next(iter(loader))
+    lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+    with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
+        sr = model(lr)
+    bicubic = F.interpolate(lr, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
+    image_grid = torchvision.utils.make_grid(torch.cat([bicubic, sr, hr], dim=0), normalize=True)
+    wandb.log({"validation_samples": wandb.Image(image_grid, caption=f"Epoch {epoch+1}")})
+    model.train()
 
 def main(args):
     # Initialize Weights & Biases for experiment tracking
@@ -89,50 +117,64 @@ def main(args):
     scaler = GradScaler(device_type=config.DEVICE, enabled=(config.DEVICE != 'cpu'))
 
     start_epoch = 0
-    # The same robust checkpointing and resuming logic from your other scripts
-    if args.resume_epoch > 0:
-        start_epoch = args.resume_epoch
-        print(f"--- Resuming FusedSwinIR training from Epoch {start_epoch} ---")
-        model_path = CHECKPOINT_DIR / f"fused_swinir_epoch_{start_epoch}.pth"
-        model.load_state_dict(torch.load(model_path, map_location=config.DEVICE))
-    
-    # A Cosine Annealing scheduler is a powerful tool for helping the model settle into a good minimum.
+    best_psnr = 0.0
+
+    # --- Full Automatic Resume Logic ---
+    if args.resume:
+        ckpt_files = list(CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"))
+        if ckpt_files:
+            latest_ckpt_path = max(ckpt_files, key=os.path.getctime)
+            print(f"--- Resuming from latest checkpoint: {latest_ckpt_path.name} ---")
+            checkpoint = torch.load(latest_ckpt_path, map_location=config.DEVICE)
+            model.load_state_dict(checkpoint['model_state_dict'])
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_psnr = checkpoint.get('best_psnr', 0.0)
+            print(f"Resumed from epoch {start_epoch} (best PSNR = {best_psnr:.2f} dB)")
+        else:
+            print("--- No checkpoint found, starting fresh. ---")
+
     scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.SWIN_EPOCHS, eta_min=1e-7, last_epoch=start_epoch - 1)
 
     print("--- Starting FusedSwinIR Training ---")
     for epoch in range(start_epoch, config.SWIN_EPOCHS):
         avg_loss = train_one_epoch(model, train_loader, optimizer, loss_fn, scaler)
-        scheduler.step()
+        
+        # --- Full Validation and Checkpointing Block ---
+        avg_psnr = validate_one_epoch(model, val_loader)
+        print(f"Epoch {epoch+1} | Train Loss: {avg_loss:.4f} | Validation PSNR: {avg_psnr:.2f} dB")
         
         wandb.log({
-            "epoch": epoch + 1,
-            "epoch_l1_loss": avg_loss,
-            "learning_rate": scheduler.get_last_lr()[0]
+            "epoch": epoch + 1, 
+            "Train/loss": avg_loss, 
+            "Validation/psnr": avg_psnr,
+            "Train/lr": scheduler.get_last_lr()[0]
         })
+        scheduler.step()
+        
+        sample_and_log_images(model, val_loader, epoch)
+        
+        # Save best model
+        if avg_psnr > best_psnr:
+            best_psnr = avg_psnr
+            torch.save(model.state_dict(), CHECKPOINT_DIR / "best_model.pth")
+            print(f"New best model saved with PSNR: {best_psnr:.2f} dB")
 
-        # Periodically save a model checkpoint
-        if (epoch + 1) % 10 == 0:
-            torch.save(model.state_dict(), CHECKPOINT_DIR / f"fused_swinir_epoch_{epoch+1}.pth")
-            
-            # Log a validation image sample to wandb for visual progress tracking
-            model.eval()
-            with torch.no_grad():
-                lr, hr = next(iter(val_loader))
-                lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
-                
-                with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
-                    sr = model(lr)
-
-                bicubic = F.interpolate(lr, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-                
-                # Create a grid: [Bicubic Upscale | Model Output | Ground Truth]
-                image_grid = torchvision.utils.make_grid(torch.cat([bicubic, sr, hr], dim=0), normalize=True)
-                wandb.log({"validation_samples": wandb.Image(image_grid, caption=f"Epoch {epoch+1}")})
-            model.train()
+        # Save latest checkpoint
+        for old_ckpt in CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"): old_ckpt.unlink()
+        latest_ckpt_path = CHECKPOINT_DIR / f"latest_checkpoint_epoch_{epoch + 1}.pth"
+        checkpoint_data = {
+            'epoch': epoch + 1, 'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': scheduler.state_dict(),
+            'best_psnr': best_psnr
+        }
+        torch.save(checkpoint_data, latest_ckpt_path)
+        print(f"Checkpoint saved for epoch {epoch + 1}")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Train the FusedSwinIR model for Super-Resolution.")
-    parser.add_argument("--resume_epoch", type=int, default=0, help="Epoch to resume training from.")
+    parser = argparse.ArgumentParser(description="Train the FusedSwinIR model.")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.") # <-- MODIFIED
     parser.add_argument("--wandb_id", type=str, default=None, help="Weights & Biases run ID to resume logging.")
     args = parser.parse_args()
     main(args)

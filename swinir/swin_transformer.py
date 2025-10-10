@@ -94,6 +94,7 @@ class WindowAttention(nn.Module):
         x = self.proj_drop(x)
         return x
 
+
 class SwinTransformer(nn.Module):
     """The main Swin Transformer Block."""
     def __init__(self, dim, num_heads, window_size=8, shift_size=0, attn_drop=0.0, proj_drop=0.0):
@@ -112,9 +113,6 @@ class SwinTransformer(nn.Module):
             nn.Linear(4 * dim, dim),
             nn.Dropout(proj_drop) # Use proj_drop for MLP as well
         )
-        
-        # ✅ FIX: The attention mask creation depends on the input size,
-        # so it must be calculated in the forward pass, not in __init__.
         self.attn_mask = None
 
     def create_mask(self, H, W, device):
@@ -140,15 +138,11 @@ class SwinTransformer(nn.Module):
         B, H, W, C = x.shape
         shortcut = x
         
-        # ✅ FIX: Create the mask dynamically in the forward pass
-        # This prevents the NameError from the original __init__
         if self.shift_size > 0:
             self.attn_mask = self.create_mask(H, W, x.device)
 
         x = self.norm1(x)
 
-        # ✅ FIX: Correct logic for cyclic shift and windowing
-        # The shift must happen on the 4D tensor *before* partitioning.
         if self.shift_size > 0:
             shifted_x = torch.roll(x, shifts=(-self.shift_size, -self.shift_size), dims=(1, 2))
         else:
@@ -170,3 +164,46 @@ class SwinTransformer(nn.Module):
         x = shortcut + x
         x = x + self.mlp(self.norm2(x))
         return x
+
+
+class ResidualSwinTransformerLayer(nn.Module):
+    """
+    A layer of Swin Transformer blocks, composed of sequential blocks
+    with alternating regular (W-MSA) and shifted (SW-MSA) windows.
+    """
+    def __init__(self, dim, num_heads, window_size=8, num_blocks=6):
+        super().__init__()
+        
+        self.blocks = nn.ModuleList()
+        for i in range(num_blocks):
+            # Every other block uses a shifted window
+            shift_size = window_size // 2 if (i % 2 != 0) else 0
+            self.blocks.append(
+                SwinTransformer(
+                    dim=dim,
+                    num_heads=num_heads,
+                    window_size=window_size,
+                    shift_size=shift_size
+                )
+            )
+            
+        # A final convolutional layer for the residual connection
+        self.conv = nn.Conv2d(dim, dim, 3, 1, 1)
+
+    def forward(self, x):
+        # The SwinTransformerBlock expects (B, H, W, C)
+        # Assuming input x is (B, C, H, W), we permute it
+        B, C, H, W = x.shape
+        shortcut = x
+        
+        x = x.permute(0, 2, 3, 1) # (B, H, W, C)
+        
+        for block in self.blocks:
+            x = block(x)
+        
+        # Permute back to (B, C, H, W) for the convolutional layer
+        x = x.permute(0, 3, 1, 2)
+        x = self.conv(x)
+        
+        # Add the main residual connection
+        return shortcut + x

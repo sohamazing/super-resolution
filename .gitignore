@@ -1,26 +1,59 @@
-# Ignore datasets
+# ==================================
+# Datasets and Large Files
+# ==================================
+# Ignore all data directories
 data/
 div2K-flickr2K-data/
 data_mount/
 
-# Ignore large model checkpoint files
-esrgan/checkpoints/
+# ==================================
+# Model Checkpoints
+# ==================================
+# Ignore all model-specific checkpoint directories
 diffusion/checkpoints/
-# *.pth
+esrgan/checkpoints/
+fused_gan/checkpoints/
+swinir/checkpoints/
 
-# Ignore Python cache and environment files
-__pycache__/
+# ==================================
+# Python & Environment
+# ==================================
+# Ignore Python caches and virtual environment files
+**/__pycache__/
 *.pyc
 .env
+.venv/
+venv/
 
+# Ignore Jupyter Notebook checkpoints
+.ipynb_checkpoints
+
+# ==================================
+# OS & Editor Specific
+# ==================================
 # Ignore macOS specific files
 .DS_Store
 
-# Ignore secret credential files
+# Ignore common editor/IDE directories
+.vscode/
+.idea/
+
+# ==================================
+# Logs and Credentials
+# ==================================
+# Ignore secret credential files (e.g., Google OAuth)
 *.json
 
 # Ignore Weights & Biases local logs
 wandb/
 
-# Ignore legacy files
+# ==================================
+# Project Specific
+# ==================================
+# Ignore temporary, archived, or legacy files
+archive/
 legacy/
+temp/
+tmp/
+
+

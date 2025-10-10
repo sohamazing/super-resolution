@@ -47,7 +47,7 @@ class UpsampleBlock(nn.Module):
     def forward(self, x):
         return self.lrelu(self.pixel_shuffle(self.conv(x)))
 
-class GeneratorRRDB(nn.Module):
+class GeneratorESRGAN(nn.Module):
     """The complete generator model for 4x upscaling with PixelShuffle."""
     def __init__(self, in_channels=3, out_channels=3, num_features=64, num_blocks=23):
         super().__init__()

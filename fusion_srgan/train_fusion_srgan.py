@@ -1,4 +1,4 @@
-# fused_gan/train_fused_gan.py
+# fusion_srgan/train_fusion_srgan.py
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
@@ -18,7 +18,7 @@ SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
 # --- Import all our custom components ---
-from fused_gan.generator_hcast import HCASTGenerator
+from fused_gan.generator_swinunet import SwinUNetGenerator
 from fused_gan.discriminator_unet import DiscriminatorUNet
 from utils.loss import FusedGANLoss
 from utils.datasets import TrainDataset, ValDataset
@@ -185,33 +185,39 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d
     }
 
 @torch.no_grad()
-def validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, autocast_context, ema=None):
-    """Run validation and create visualization."""
+def validate_one_epoch(gen, val_loader, autocast_context, ema=None):
+    """Calculates PSNR over the entire validation set for an accurate metric."""
     gen.eval()
-
-    if ema is not None:
-        ema.apply_shadow()
-
-    with autocast_context:
-        fake_hr = gen(val_sample_lr)
-
-    mse = F.mse_loss(fake_hr, val_sample_hr)
-    psnr = 10 * torch.log10(1 / mse)
-    grid = torchvision.utils.make_grid(
-        torch.cat([fake_hr, val_sample_hr], dim=0), normalize=True, nrow=fake_hr.shape[0]
-    )
+    if ema: ema.apply_shadow()
     
-    wandb.log({
-        "Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1} | PSNR: {psnr:.2f} dB"),
-        "Validation/psnr": psnr.item(),
-        "Validation/epoch": epoch
-    })
-    
-    if ema is not None:
-        ema.restore()
-
+    total_psnr = 0
+    for lr, hr in tqdm(val_loader, desc="Validating", leave=False):
+        lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+        with autocast_context:
+            fake_hr = gen(lr)
+            mse = F.mse_loss(fake_hr, hr)
+            total_psnr += (10 * torch.log10(1 / mse)).item()
+            
+    if ema: ema.restore()
     gen.train()
-    return psnr.item()
+    return total_psnr / len(val_loader)
+
+@torch.no_grad()
+def sample_and_log_images(gen, val_loader, epoch, autocast_context, ema=None):
+    """Logs a visual sample of [Generated | Ground Truth]."""
+    gen.eval()
+    if ema: ema.apply_shadow()
+
+    lr, hr = next(iter(val_loader))
+    lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+    with autocast_context:
+        fake_hr = gen(lr)
+        
+    grid = torchvision.utils.make_grid(torch.cat([fake_hr, hr], dim=0), normalize=True, nrow=lr.size(0))
+    wandb.log({"Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
+    
+    if ema: ema.restore()
+    gen.train()
 
 def main(args):
     wandb.init(
@@ -238,15 +244,21 @@ def main(args):
     )
     val_loader = DataLoader(val_dataset, batch_size=4, shuffle=False)
 
-    gen = HCASTGenerator().to(config.DEVICE)
-    disc = DiscriminatorUNet().to(config.DEVICE)
+    gen = SwinUNetGenerator(features = config.FUSION_SRGAN_GEN_FEATURES,
+        embed_dim = config.FUSION_SRGAN_EMBED_DIM,
+        num_heads = config.FUSION_SRGAN_NUM_HEADS,
+        window_size = config.FUSION_SRGAN_WINDOW_SIZE,
+        num_swin_blocks = config.FUSION_SRGAN_NUM_SWIN_BLOCKS,
+        scale = config.SCALE,
+        dropout = config.FUSION_SRGAN_DROPOUT).to(config.DEVICE)
+    disc = DiscriminatorUNet(features = config.FUSION_SRGAN_DIS_FEATURES).to(config.DEVICE)
     loss_fn = FusedGANLoss()
 
-    opt_g = optim.AdamW(gen.parameters(), lr=config.FUSEDGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
-    opt_d = optim.AdamW(disc.parameters(), lr=config.FUSEDGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+    opt_g = optim.AdamW(gen.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+    opt_d = optim.AdamW(disc.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
 
-    scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
-    scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
+    scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)
+    scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)
 
     scheduler_g_pretrain = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.PRETRAIN_EPOCHS, eta_min=1e-6)
 
@@ -266,34 +278,27 @@ def main(args):
 
     pretrained_file = CHECKPOINT_DIR / "generator_pretrained.pth"
     start_epoch, best_psnr = 0, 0.0
-    latest_checkpoint_path = None
 
     # --- AUTOMATIC RESUME LOGIC ---
-    checkpoint_files = list(CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"))
-    if checkpoint_files:
-        latest_epoch = -1
-        for f in checkpoint_files:
-            match = re.search(r'latest_checkpoint_(\d+).pth', f.name)
-            if match:
-                epoch_num = int(match.group(1))
-                if epoch_num > latest_epoch:
-                    latest_epoch = epoch_num
-                    latest_checkpoint_path = f
-
-    if latest_checkpoint_path:
-        start_epoch = latest_epoch
-        print(f"--- Found checkpoint. Resuming GAN training from Epoch {start_epoch} ---")
-        checkpoint = torch.load(latest_checkpoint_path, map_location=config.DEVICE)
-        gen.load_state_dict(checkpoint['gen_state_dict'])
-        disc.load_state_dict(checkpoint['disc_state_dict'])
-        opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
-        opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
-        scheduler_g.load_state_dict(checkpoint['scheduler_g_state_dict'])
-        scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
-        best_psnr = checkpoint.get('best_psnr', 0.0)
-        if ema and 'ema_state_dict' in checkpoint:
-            ema.shadow = checkpoint['ema_state_dict']
-        print(f"Checkpoint loaded. Best PSNR so far: {best_psnr:.2f} dB")
+    if args.resume:
+        checkpoint_files = list(CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"))
+        if checkpoint_files:
+            latest_checkpoint_path = max(checkpoint_files, key=os.path.getctime)
+            print(f"--- Resuming from latest checkpoint: {latest_checkpoint_path.name} ---")
+            checkpoint = torch.load(latest_checkpoint_path, map_location=config.DEVICE)
+            gen.load_state_dict(checkpoint['gen_state_dict'])
+            disc.load_state_dict(checkpoint['disc_state_dict'])
+            opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
+            opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
+            scheduler_g.load_state_dict(checkpoint['scheduler_g_state_dict'])
+            scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
+            start_epoch = checkpoint['epoch']
+            best_psnr = checkpoint.get('best_psnr', 0.0)
+            if ema and 'ema_state_dict' in checkpoint:
+                ema.shadow = checkpoint['ema_state_dict']
+            print(f"Resumed from epoch {start_epoch} (best PSNR = {best_psnr:.2f} dB)")
+        else:
+            print("--- No checkpoint found, starting fresh. ---")
 
     elif args.mode in ["train", "all"] and pretrained_file.exists():
         print(f"Loading pretrained generator from '{pretrained_file}'")
@@ -305,15 +310,15 @@ def main(args):
         print(f"Pre-training complete. Model saved to '{pretrained_file}'")
 
         # Reset optimizers and schedulers for GAN phase
-        opt_g = optim.AdamW(gen.parameters(), lr=config.FUSEDGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
-        opt_d = optim.AdamW(disc.parameters(), lr=config.FUSEDGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
-        scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
-        scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
+        opt_g = optim.AdamW(gen.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+        opt_d = optim.AdamW(disc.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+        scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)
+        scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)
 
     # --- MAIN TRAINING LOOP ---
     if args.mode in ["train", "all"]:
-        print("\n--- Starting Main Fused-GAN Training ---")
-        for epoch in range(start_epoch, config.FUSEDGAN_EPOCHS):
+        print("\n--- Starting Main Fused-SRGAN Training ---")
+        for epoch in range(start_epoch, config.FUSION_SRGAN_EPOCHS):
             metrics = train_one_epoch(gen, disc, train_loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d, autocast_context, ema, epoch)
             wandb.log({
                 "Train/epoch_d_loss": metrics['d_loss'],
@@ -323,14 +328,30 @@ def main(args):
             })
             scheduler_g.step(); scheduler_d.step()
 
-            if (epoch + 1) % 5 == 0:
+            # --- Validation and Checkpointing ---
+            if (epoch + 1) % config.CHECKPOINT_INTERVAL == 0: # Or your desired interval
                 print(f"\nRunning validation...")
                 psnr = validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, autocast_context, ema)
-                print(f"  Validation PSNR: {psnr:.2f} dB")
+                print(f"Epoch {epoch+1} | Validation PSNR: {psnr:.2f} dB")
+                wandb.log({"epoch": epoch + 1, "Validation/psnr": psnr})
 
-                # --- SAVE CHECKPOINT LOGIC ---
-                checkpoint = {
-                    'Epoch': epoch + 1,
+                # Save best model (Generator only)
+                if psnr > best_psnr:
+                    best_psnr = psnr
+                    # If using EMA, save the shadow weights for the best model
+                    if ema:
+                        ema.apply_shadow()
+                        torch.save(gen.state_dict(), CHECKPOINT_DIR / "best_generator.pth")
+                        ema.restore()
+                    else:
+                        torch.save(gen.state_dict(), CHECKPOINT_DIR / "best_generator.pth")
+                    print(f"New best generator saved with PSNR: {best_psnr:.2f} dB")
+
+                # Save latest checkpoint (Full training state)
+                for old_ckpt in CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"): old_ckpt.unlink()
+                latest_ckpt_path = CHECKPOINT_DIR / f"latest_checkpoint_epoch_{epoch + 1}.pth"
+                checkpoint_data = {
+                    'epoch': epoch + 1,
                     'gen_state_dict': gen.state_dict(),
                     'disc_state_dict': disc.state_dict(),
                     'opt_g_state_dict': opt_g.state_dict(),
@@ -339,26 +360,14 @@ def main(args):
                     'scheduler_d_state_dict': scheduler_d.state_dict(),
                     'best_psnr': best_psnr
                 }
-                if ema:
-                    checkpoint['ema_state_dict'] = ema.shadow
-
-                # Delete old latest checkpoints
-                for old_ckpt in CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"):
-                    old_ckpt.unlink()
-
-                # Save new latest checkpoint
-                torch.save(checkpoint, CHECKPOINT_DIR / f"latest_checkpoint_{epoch+1}.pth")
-
-                # Save best model
-                if psnr > best_psnr:
-                    best_psnr = psnr
-                    checkpoint['best_psnr'] = best_psnr
-                    torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-                    print(f"New best model! PSNR: {psnr:.2f} dB")
+                if ema: checkpoint_data['ema_state_dict'] = ema.shadow
+                torch.save(checkpoint_data, latest_ckpt_path)
+                print(f"Checkpoint saved for epoch {epoch + 1}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Fused-GAN model.")
     parser.add_argument("--mode", type=str, default="all", choices=["pretrain", "train", "all"], help="Set training mode.")
+    parser.add_argument("--resume", action="store_true", help="Resume training from the latest checkpoint.") # <-- MODIFIED
     parser.add_argument("--wandb_id", type=str, default=None, help="Weights & Biases run ID to resume logging.")
     parser.add_argument("--use_ema", action="store_true", help="Use Exponential Moving Average.")
     args = parser.parse_args()
