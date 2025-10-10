@@ -3,7 +3,6 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
 class ConvBlock(nn.Module):
     """A standard convolutional block for the U-Net discriminator."""
     def __init__(self, in_channels, out_channels, use_instance_norm=True):
@@ -38,7 +37,7 @@ class DiscriminatorUNet(nn.Module):
       up[3]: concat(32, skip_0:64) -> up to 64 -> refine
       final: 64 -> 32 -> output
     """
-    def __init__(self, in_channels=3, features=config.FUSION_SRGAN_DIS_FEATURES):
+    def __init__(self, in_channels=3, features=[32, 64, 128, 256]):
         super().__init__()
 
         # --- Encoder (Downsampling Path) ---
