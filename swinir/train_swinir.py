@@ -2,6 +2,7 @@
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import argparse
@@ -34,7 +35,7 @@ def train_one_epoch(model, loader, optimizer, loss_fn, scaler):
 
         # Use torch.cuda.amp.autocast to run the forward pass in mixed precision.
         # This significantly speeds up training on NVIDIA L4, T4, V100, A100 GPUs.
-        with torch.cuda.amp.autocast():
+        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
             sr = model(lr)
             loss = loss_fn(sr, hr)
 
@@ -56,13 +57,10 @@ def main(args):
     train_dataset = TrainDataset(
         hr_dir=config.DATA_DIR / "train" / "HR", 
         lr_dir=config.DATA_DIR / "train" / "LR",
-        scale_factor=config.SCALE
     )
     val_dataset = ValDataset(
         hr_dir=config.DATA_DIR / "val" / "HR", 
         lr_dir=config.DATA_DIR / "val" / "LR",
-        scale_factor=config.SCALE,
-        hr_crop_size=config.HR_CROP_SIZE
     )
 
     train_loader = DataLoader(
@@ -88,7 +86,7 @@ def main(args):
     loss_fn = nn.L1Loss()
     
     # GradScaler is essential for stable mixed-precision training.
-    scaler = torch.cuda.amp.GradScaler()
+    scaler = GradScaler(device_type=config.DEVICE, enabled=(config.DEVICE != 'cpu'))
 
     start_epoch = 0
     # The same robust checkpointing and resuming logic from your other scripts
@@ -122,7 +120,7 @@ def main(args):
                 lr, hr = next(iter(val_loader))
                 lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
                 
-                with torch.cuda.amp.autocast():
+                with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
                     sr = model(lr)
 
                 bicubic = F.interpolate(lr, scale_factor=config.SCALE, mode='bicubic', align_corners=False)

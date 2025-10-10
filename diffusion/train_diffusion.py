@@ -4,6 +4,7 @@ from torch import nn, optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
 import torchvision.utils
+from torch.amp import autocast, GradScaler
 from pathlib import Path
 from PIL import Image
 from tqdm import tqdm
@@ -79,7 +80,8 @@ def main(args):
     scheduler = Scheduler(timesteps=config.TIMESTEPS)
     optimizer = optim.Adam(model.parameters(), lr=config.DIFFUSION_LR)
     loss_fn = nn.L1Loss() # L1 loss (Mean Absolute Error) is often more stable for image tasks
-    
+    scaler = GradScaler(config.DEVICE, enabled=(config.DEVICE != 'cpu'))
+
     start_epoch = 0
     # Check if resuming from a checkpoint
     if args.resume_epoch > 0:
@@ -103,22 +105,25 @@ def main(args):
         for i, (lr_batch, hr_batch) in enumerate(loop):
             lr_batch, hr_batch = lr_batch.to(config.DEVICE), hr_batch.to(config.DEVICE)
             
-            # 1. Pick a random timestep 't' for each image in the batch
-            t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=config.DEVICE).long()
-            # 2. Create the ground-truth noise
-            noise = torch.randn_like(hr_batch)
-            # 3. Use the scheduler to create the noisy image for timestep 't'
-            noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
-            # 4. Create the LR image condition, upscaled to the target size
-            lr_upscaled = nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-            # 5. Get the model's prediction of the noise
-            predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
-            # 6. Calculate the loss between the actual noise and the predicted noise
-            loss = loss_fn(noise, predicted_noise)
-            # 7. Backpropagation
+            with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+                # Pick a random timestep 't' for each image in the batch
+                t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=config.DEVICE).long()
+                # Create the ground-truth noise
+                noise = torch.randn_like(hr_batch)
+                # Use the scheduler to create the noisy image for timestep 't'
+                noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
+                # Create the LR image condition, upscaled to the target size
+                lr_upscaled = nn.functional.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
+                # Get the model's prediction of the noise
+                predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
+                # Calculate the loss between the actual noise and the predicted noise
+                loss = loss_fn(noise, predicted_noise)
+
+            # Backpropagation
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            scaler.scale(loss).backward()
+            scaler.step(optimizer)
+            scaler.update()
 
             avg_loss += loss.item()
             loop.set_postfix(loss=loss.item()) # Update the progress bar
@@ -128,7 +133,7 @@ def main(args):
         lr_scheduler.step()
 
         # Save a checkpoint and log a visual sample every 25 epochs
-        if (epoch + 1) % 25 == 0:
+        if (epoch + 1) % 10 == 0:
             print("...Saving model checkpoint and logging validation sample...")
             torch.save(model.state_dict(), CHECKPOINT_DIR / f"diffusion_model_epoch_{epoch+1}.pth")
             torch.save(optimizer.state_dict(), CHECKPOINT_DIR / f"optimizer_diffusion_epoch_{epoch+1}.pth")

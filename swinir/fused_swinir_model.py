@@ -3,7 +3,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-from .swin_transformer import SwinTransformerBlock
+from .swin_transformer import SwinTransformer
 from .cnn_feature_extractor import CNNFeatureExtractor
 
 class ResidualSwinTransformerLayer(nn.Module):
@@ -19,7 +19,7 @@ class ResidualSwinTransformerLayer(nn.Module):
             # Every other block uses a shifted window
             shift_size = window_size // 2 if (i % 2 != 0) else 0
             self.blocks.append(
-                SwinTransformerBlock(
+                SwinTransformer(
                     dim=dim,
                     num_heads=num_heads,
                     window_size=window_size,
@@ -62,7 +62,7 @@ class FusionBlock(nn.Module):
         # The features are added element-wise, then passed through the refining convolution.
         return self.conv(transformer_features + cnn_features)
 
-class FusedSwinTransformer(nn.Module):
+class FusedSwinIR(nn.Module):
     """
     The final, professionally implemented Fused-Scale SwinIR model for 4x Super-Resolution.
     """

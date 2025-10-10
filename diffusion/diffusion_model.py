@@ -45,27 +45,28 @@ class ResidualBlock(nn.Module):
         return h + self.identity_conv(x)
 
 class SelfAttention(nn.Module):
-    """A self-attention block to capture long-range dependencies."""
-    def __init__(self, channels):
+    def __init__(self, channels, num_heads=4, ff_hidden=512):
         super().__init__()
         self.channels = channels
-        # Project input into Query, Key, and Value
-        self.to_qkv = nn.Conv2d(channels, channels * 3, 1, bias=False)
-        # Final output projection
-        self.to_out = nn.Conv2d(channels, channels, 1)
-    
+        self.ln = nn.LayerNorm(channels)
+        self.mha = nn.MultiheadAttention(embed_dim=channels, num_heads=num_heads, batch_first=True)
+        self.ff_self = nn.Sequential(
+            nn.Linear(channels, ff_hidden),
+            nn.ReLU(),
+            nn.Linear(ff_hidden, channels)
+        )
+
     def forward(self, x):
         b, c, h, w = x.shape
-        # Create Query, Key, Value matrices
-        qkv = self.to_qkv(x).view(b, 3, c, h * w)
-        q, k, v = qkv.unbind(dim=1)
-        
-        # Calculate similarity scores between all pairs of pixels
-        attention = torch.einsum("bci,bcj->bij", q, k).softmax(dim=-1)
-        # Apply attention weights to the values to get a context-aware output
-        out = torch.einsum("bij,bcj->bci", attention, v).view(b, c, h, w)
-        # Add the original input to the output
-        return self.to_out(out) + x
+        # reshape for MHA: (b, h*w, c)
+        x_reshaped = x.reshape(b, c, h * w).swapaxes(1, 2).contiguous()
+        x_ln = self.ln(x_reshaped)
+        attn_out, _ = self.mha(x_ln, x_ln, x_ln)
+        attn_out = attn_out + x_reshaped
+        out = self.ff_self(attn_out) + attn_out
+        # reshape back to (b, c, h, w)
+        return out.swapaxes(2, 1).contiguous().reshape(b, c, h, w)
+
 
 class DiffusionUNet(nn.Module):
     """A professional U-Net with Residual blocks, Self-Attention, and Conditioning."""

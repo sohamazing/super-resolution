@@ -2,6 +2,7 @@
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
+from torch.amp import autocast, GradScaler
 from tqdm import tqdm
 import wandb
 import argparse
@@ -10,12 +11,13 @@ from pathlib import Path
 import torchvision
 import torch.nn.functional as F
 import contextlib
+import re
 
-# --- Project Structure Setup (unchanged) ---
+# --- Project Structure Setup ---
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
-# --- Import all our custom components (unchanged) ---
+# --- Import all our custom components ---
 from fused_gan.generator_hcast import HCASTGenerator
 from fused_gan.discriminator_unet import DiscriminatorUNet
 from utils.loss import FusedGANLoss
@@ -81,10 +83,8 @@ def pretrain_generator(gen, loader, opt_g, scheduler_g, scaler_g, autocast_conte
             # Backpropagation
             opt_g.zero_grad(set_to_none=True)
             scaler_g.scale(loss).backward()
-
             scaler_g.unscale_(opt_g) # Must unscale before clipping
             torch.nn.utils.clip_grad_norm_(gen.parameters(), max_norm=1.0) # Gradient clipping for stability
-
             scaler_g.step(opt_g) # Apply gradients
             scaler_g.update()
 
@@ -97,16 +97,16 @@ def pretrain_generator(gen, loader, opt_g, scheduler_g, scaler_g, autocast_conte
 
             if i % 200 == 0:
                 wandb.log({
-                    "pretrain/l1_loss": loss.item(),
-                    "pretrain/step": epoch * len(loader) + i
+                    "Pretrain/l1_loss": loss.item(),
+                    "Pretrain/step": epoch * len(loader) + i
                 })
 
         # Log epoch metrics and step scheduler
         avg_loss = epoch_loss / len(loader)
         wandb.log({
-            "pretrain/epoch_loss": avg_loss,
-            "pretrain/epoch": epoch,
-            "pretrain/lr": scheduler_g.get_last_lr()[0]
+            "Pretrain/epoch_loss": avg_loss,
+            "Pretrain/epoch": epoch,
+            "Pretrain/lr": scheduler_g.get_last_lr()[0]
         })
 
         scheduler_g.step()
@@ -169,9 +169,9 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d
 
         if i % 100 == 0:
             wandb.log({
-                "train/d_loss": d_loss.item(), "train/g_loss": g_loss.item(),
-                "train/pixel_loss": pix_loss.item(), "train/adversarial_loss": adv_loss.item(),
-                "train/perceptual_loss": percep_loss.item(), "train/step": epoch * len(loader) + i
+                "Train/d_loss": d_loss.item(), "Train/g_loss": g_loss.item(),
+                "Train/pixel_loss": pix_loss.item(), "Train/adversarial_loss": adv_loss.item(),
+                "Train/perceptual_loss": percep_loss.item(), "Train/step": epoch * len(loader) + i
             })
 
         loop.set_postfix(
@@ -185,29 +185,28 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d
     }
 
 @torch.no_grad()
-def validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, ema=None):
+def validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, autocast_context, ema=None):
     """Run validation and create visualization."""
     gen.eval()
 
     if ema is not None:
         ema.apply_shadow()
 
-    with torch.cuda.amp.autocast(enabled=(config.DEVICE == "cuda")):
+    with autocast_context:
         fake_hr = gen(val_sample_lr)
 
     mse = F.mse_loss(fake_hr, val_sample_hr)
     psnr = 10 * torch.log10(1 / mse)
-
     grid = torchvision.utils.make_grid(
         torch.cat([fake_hr, val_sample_hr], dim=0), normalize=True, nrow=fake_hr.shape[0]
     )
-
+    
     wandb.log({
-        "validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1} | PSNR: {psnr:.2f} dB"),
-        "validation/psnr": psnr.item(),
-        "validation/epoch": epoch
+        "Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1} | PSNR: {psnr:.2f} dB"),
+        "Validation/psnr": psnr.item(),
+        "Validation/epoch": epoch
     })
-
+    
     if ema is not None:
         ema.restore()
 
@@ -219,19 +218,18 @@ def main(args):
         project="SuperResolution-FusedGAN", config=vars(config),
         resume="allow" if args.wandb_id else None, id=args.wandb_id
     )
-    # Use TrainDataset for the training set (already cropped, adds rotations)
+
     train_dataset = TrainDataset(
         hr_dir=config.DATA_DIR / "train" / "HR",
         lr_dir=config.DATA_DIR / "train" / "LR",
-    ) 
-    # Use ValDataset for the validation set (with center cropping)
+    )
     val_dataset = ValDataset(
         hr_dir=config.DATA_DIR / "val" / "HR",
         lr_dir=config.DATA_DIR / "val" / "LR",
     )
 
     train_loader = DataLoader(
-        train_dataset, 
+        train_dataset,
         batch_size=config.BATCH_SIZE, shuffle=True,
         num_workers=config.NUM_WORKERS,
         pin_memory=(config.DEVICE == "cuda"),
@@ -250,17 +248,13 @@ def main(args):
     scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
     scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
 
-    # Scheduler for pretrain phase
     scheduler_g_pretrain = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.PRETRAIN_EPOCHS, eta_min=1e-6)
 
-    # Cross-platform Automatic Mixed Precision (AMP) setup
     amp_enabled = config.DEVICE != 'cpu'
-    # Use bfloat16 for MPS (Apple Silicon) if available, otherwise float16 for CUDA
     dtype = torch.bfloat16 if config.DEVICE == 'mps' and torch.cuda.is_bf16_supported() else torch.float16
-    
-    scaler_g = torch.amp.GradScaler(device_type=config.DEVICE, enabled=amp_enabled)
-    scaler_d = torch.amp.GradScaler(device_type=config.DEVICE, enabled=amp_enabled)
-    autocast_context = torch.amp.autocast(device_type=config.DEVICE, dtype=dtype, enabled=amp_enabled)
+    scaler_g = GradScaler(config.DEVICE, enabled=amp_enabled)
+    scaler_d = GradScaler(config.DEVICE, enabled=amp_enabled)
+    autocast_context = autocast(device_type=config.DEVICE, dtype=dtype, enabled=amp_enabled)
 
     ema = EMA(gen) if args.use_ema else None
     if ema:
@@ -272,25 +266,34 @@ def main(args):
 
     pretrained_file = CHECKPOINT_DIR / "generator_pretrained.pth"
     start_epoch, best_psnr = 0, 0.0
+    latest_checkpoint_path = None
 
-    if args.resume_epoch > 0:
-        # Resume from checkpoint
-        start_epoch = args.resume_epoch
-        latest_checkpoint_path = CHECKPOINT_DIR / "latest_checkpoint.pth"
-        print(f"--- Resuming GAN training from Epoch {start_epoch} ---")
-        if latest_checkpoint_path.exists():
-            checkpoint = torch.load(latest_checkpoint_path, map_location=config.DEVICE)
-            gen.load_state_dict(checkpoint['gen_state_dict'])
-            disc.load_state_dict(checkpoint['disc_state_dict'])
-            opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
-            opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
-            scheduler_g.load_state_dict(checkpoint['scheduler_g_state_dict'])
-            scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
-            best_psnr = checkpoint.get('best_psnr', 0.0)
-            if ema and 'ema_state_dict' in checkpoint: ema.shadow = checkpoint['ema_state_dict']
-            print(f"Checkpoint loaded. Best PSNR so far: {best_psnr:.2f} dB")
-        else:
-            print(f"Warning: Checkpoint not found at {latest_checkpoint_path}")
+    # --- AUTOMATIC RESUME LOGIC ---
+    checkpoint_files = list(CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"))
+    if checkpoint_files:
+        latest_epoch = -1
+        for f in checkpoint_files:
+            match = re.search(r'latest_checkpoint_(\d+).pth', f.name)
+            if match:
+                epoch_num = int(match.group(1))
+                if epoch_num > latest_epoch:
+                    latest_epoch = epoch_num
+                    latest_checkpoint_path = f
+
+    if latest_checkpoint_path:
+        start_epoch = latest_epoch
+        print(f"--- Found checkpoint. Resuming GAN training from Epoch {start_epoch} ---")
+        checkpoint = torch.load(latest_checkpoint_path, map_location=config.DEVICE)
+        gen.load_state_dict(checkpoint['gen_state_dict'])
+        disc.load_state_dict(checkpoint['disc_state_dict'])
+        opt_g.load_state_dict(checkpoint['opt_g_state_dict'])
+        opt_d.load_state_dict(checkpoint['opt_d_state_dict'])
+        scheduler_g.load_state_dict(checkpoint['scheduler_g_state_dict'])
+        scheduler_d.load_state_dict(checkpoint['scheduler_d_state_dict'])
+        best_psnr = checkpoint.get('best_psnr', 0.0)
+        if ema and 'ema_state_dict' in checkpoint:
+            ema.shadow = checkpoint['ema_state_dict']
+        print(f"Checkpoint loaded. Best PSNR so far: {best_psnr:.2f} dB")
 
     elif args.mode in ["train", "all"] and pretrained_file.exists():
         print(f"Loading pretrained generator from '{pretrained_file}'")
@@ -307,28 +310,46 @@ def main(args):
         scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
         scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSEDGAN_EPOCHS, eta_min=1e-6)
 
+    # --- MAIN TRAINING LOOP ---
     if args.mode in ["train", "all"]:
         print("\n--- Starting Main Fused-GAN Training ---")
         for epoch in range(start_epoch, config.FUSEDGAN_EPOCHS):
             metrics = train_one_epoch(gen, disc, train_loader, opt_g, opt_d, loss_fn, scaler_g, scaler_d, autocast_context, ema, epoch)
             wandb.log({
-                "train/epoch_d_loss": metrics['d_loss'], 
-                "train/epoch_g_loss": metrics['g_loss'], 
-                "train/lr_g": scheduler_g.get_last_lr()[0], 
+                "Train/epoch_d_loss": metrics['d_loss'],
+                "Train/epoch_g_loss": metrics['g_loss'],
+                "Train/lr_g": scheduler_g.get_last_lr()[0],
                 "epoch": epoch + 1
             })
             scheduler_g.step(); scheduler_d.step()
 
             if (epoch + 1) % 5 == 0:
                 print(f"\nRunning validation...")
-                psnr = validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, ema)
+                psnr = validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, autocast_context, ema)
                 print(f"  Validation PSNR: {psnr:.2f} dB")
 
-                checkpoint = {'epoch': epoch + 1, 'gen_state_dict': gen.state_dict(), 'disc_state_dict': disc.state_dict(), 'opt_g_state_dict': opt_g.state_dict(), 'opt_d_state_dict': opt_d.state_dict(), 'scheduler_g_state_dict': scheduler_g.state_dict(), 'scheduler_d_state_dict': scheduler_d.state_dict(), 'best_psnr': best_psnr}
-                if ema: checkpoint['ema_state_dict'] = ema.shadow
+                # --- SAVE CHECKPOINT LOGIC ---
+                checkpoint = {
+                    'Epoch': epoch + 1,
+                    'gen_state_dict': gen.state_dict(),
+                    'disc_state_dict': disc.state_dict(),
+                    'opt_g_state_dict': opt_g.state_dict(),
+                    'opt_d_state_dict': opt_d.state_dict(),
+                    'scheduler_g_state_dict': scheduler_g.state_dict(),
+                    'scheduler_d_state_dict': scheduler_d.state_dict(),
+                    'best_psnr': best_psnr
+                }
+                if ema:
+                    checkpoint['ema_state_dict'] = ema.shadow
 
-                torch.save(checkpoint, CHECKPOINT_DIR / "latest_checkpoint.pth")
+                # Delete old latest checkpoints
+                for old_ckpt in CHECKPOINT_DIR.glob("latest_checkpoint_*.pth"):
+                    old_ckpt.unlink()
 
+                # Save new latest checkpoint
+                torch.save(checkpoint, CHECKPOINT_DIR / f"latest_checkpoint_{epoch+1}.pth")
+
+                # Save best model
                 if psnr > best_psnr:
                     best_psnr = psnr
                     checkpoint['best_psnr'] = best_psnr
@@ -338,7 +359,6 @@ def main(args):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Fused-GAN model.")
     parser.add_argument("--mode", type=str, default="all", choices=["pretrain", "train", "all"], help="Set training mode.")
-    parser.add_argument("--resume_epoch", type=int, default=0, help="Epoch to resume GAN training from.")
     parser.add_argument("--wandb_id", type=str, default=None, help="Weights & Biases run ID to resume logging.")
     parser.add_argument("--use_ema", action="store_true", help="Use Exponential Moving Average.")
     args = parser.parse_args()

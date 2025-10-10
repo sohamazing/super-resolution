@@ -3,6 +3,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader, Dataset
 from torchvision.transforms import ToTensor
+from torch.amp import autocast, GradScaler
 from torchvision.models import vgg19
 import torchvision.utils
 from pathlib import Path
@@ -24,7 +25,7 @@ from utils.datasets import TrainDataset, ValDataset
 from utils.loss import VGGLoss
 from config import config
 
-def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss):
+def train_one_epoch(gen, disc, loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss, vgg_loss, adv_loss):
     """A single training loop for one epoch of GAN training."""
     loop = tqdm(loader, leave=True)
     for i, (lr, hr) in enumerate(loop):
@@ -32,27 +33,33 @@ def train_one_epoch(gen, disc, loader, opt_g, opt_d, l1_loss, vgg_loss, adv_loss
         hr = hr.to(config.DEVICE)
 
         # --- Train Discriminator ---
-        fake = gen(lr)
-        disc_real = disc(hr)
-        disc_fake = disc(fake.detach())
-        loss_disc_real = adv_loss(disc_real, torch.ones_like(disc_real))
-        loss_disc_fake = adv_loss(disc_fake, torch.zeros_like(disc_fake))
-        loss_disc = (loss_disc_real + loss_disc_fake) / 2
+        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+            fake = gen(lr)
+            disc_real = disc(hr)
+            disc_fake = disc(fake.detach())
+            loss_disc_real = adv_loss(disc_real, torch.ones_like(disc_real))
+            loss_disc_fake = adv_loss(disc_fake, torch.zeros_like(disc_fake))
+            loss_disc = (loss_disc_real + loss_disc_fake) / 2
 
+        # --- Discriminator Backprop ---
         disc.zero_grad()
-        loss_disc.backward()
-        opt_d.step()
+        scaler_d.scale(loss_disc).backward()
+        scaler_d.step(opt_d)
+        scaler_d.update()
 
         # --- Train Generator ---
-        disc_fake_for_gen = disc(fake)
-        gen_adv_loss = adv_loss(disc_fake_for_gen, torch.ones_like(disc_fake_for_gen))
-        gen_l1_loss = l1_loss(fake, hr)
-        gen_vgg_loss = vgg_loss(fake, hr)
-        loss_gen = (config.LAMBDA_L1 * gen_l1_loss) + (config.LAMBDA_ADV * gen_adv_loss) + (config.LAMBDA_PERCEP * gen_vgg_loss)
+        with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+            disc_fake_for_gen = disc(fake)
+            gen_adv_loss = adv_loss(disc_fake_for_gen, torch.ones_like(disc_fake_for_gen))
+            gen_l1_loss = l1_loss(fake, hr)
+            gen_vgg_loss = vgg_loss(fake, hr)
+            loss_gen = (config.LAMBDA_L1 * gen_l1_loss) + (config.LAMBDA_ADV * gen_adv_loss) + (config.LAMBDA_PERCEP * gen_vgg_loss)
 
+        # --- GENERATOR BACKPROP ---
         gen.zero_grad()
-        loss_gen.backward()
-        opt_g.step()
+        scaler_g.scale(loss_gen).backward()
+        scaler_g.step(opt_g)
+        scaler_g.update()
 
         # Log losses to wandb
         wandb.log({
@@ -87,6 +94,9 @@ def main(args):
     discriminator = Discriminator().to(config.DEVICE)
     optimizer_g = optim.Adam(generator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
     optimizer_d = optim.Adam(discriminator.parameters(), lr=config.ESRGAN_LR, betas=(0.9, 0.999))
+    scaler_g = GradScaler(config.DEVICE, enabled=(config.DEVICE != 'cpu'))
+    scaler_d = GradScaler(config.DEVICE, enabled=(config.DEVICE != 'cpu'))
+    
 
     start_epoch = 0
     if args.resume_epoch > 0:
@@ -121,13 +131,17 @@ def main(args):
             g_loss_accum = 0
             for lr, hr in loop:
                 lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
-                fake = generator(lr)
-                loss = l1_loss(fake, hr)
+                with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE != 'cpu')):
+                    fake = generator(lr)
+                    loss = l1_loss(fake, hr)
+                
                 g_loss_accum += loss.item()
                 optimizer_g.zero_grad()
-                loss.backward()
-                optimizer_g.step()
+                scaler_g.scale(loss).backward()
+                scaler_g.step(optimizer_g)
+                scaler_g.update()
                 loop.set_postfix(pretrain_l1_loss=loss.item())
+
             wandb.log({"pretrain_epoch": epoch, "pretrain_g_loss_avg": g_loss_accum / len(train_loader)})
         torch.save(generator.state_dict(), pretrained_file)
         print(f"--- Pre-training Finished. Model saved to '{pretrained_file}' ---")
@@ -141,7 +155,7 @@ def main(args):
         print("--- Starting Main GAN Training ---")
         for epoch in range(start_epoch, config.ESRGAN_EPOCHS):
             print(f"\n--- Main Training Epoch {epoch+1}/{config.ESRGAN_EPOCHS} ---")
-            train_one_epoch(generator, discriminator, train_loader, optimizer_g, optimizer_d, l1_loss, vgg_loss, adversarial_loss)
+            train_one_epoch(generator, discriminator, train_loader, optimizer_g, optimizer_d, scaler_g, scaler_d, l1_loss, vgg_loss, adversarial_loss)
             scheduler_g.step()
             scheduler_d.step()
 

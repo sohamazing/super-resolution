@@ -33,7 +33,7 @@ class SuperResConfig:
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
-    BATCH_SIZE: int = 16 # 8 
+    BATCH_SIZE: int = 8 if sys.platform == "darwin" else 16
     PRETRAIN_EPOCHS: int = 20
 
     # --- ESRGAN Specific ---
@@ -44,8 +44,8 @@ class SuperResConfig:
     LAMBDA_PERCEP: float = 1.0
 
     # --- Diffusion Specific ---
-    DIFFUSION_EPOCHS: int = 2000 # 1000
-    DIFFUSION_LR: float = 1e-4
+    DIFFUSION_EPOCHS: int = 1000 # 1000
+    DIFFUSION_LR: float = 2e-4
     TIMESTEPS: int = 1000
 
     # --- SwinIR Specific ---
