@@ -106,11 +106,11 @@ class SuperResolutionInference:
     Unified inference engine that handles model loading, image processing,
     and tiled inference for large images.
     """
-    def __init__(self, model_name: str, checkpoint_path: Optional[Path] = None, half_precision: bool = False):
+    def __init__(self, model_name: str, checkpoint_path: Optional[Path] = None, half_precision: bool = False, device: str = None):
         self.model_name = model_name
-        self.device = config.DEVICE
+        self.device = device or config.DEVICE
         self.half = half_precision and (self.device != 'cpu')
-        
+
         print(f"Initializing '{model_name.upper()}' engine on device '{self.device}' (AMP: {self.half})...")
         self.model = self._load_model(checkpoint_path)
         self.model.eval()
@@ -121,22 +121,22 @@ class SuperResolutionInference:
         """Loads model architecture and weights from the registry."""
         if self.model_name not in MODEL_REGISTRY:
             raise ValueError(f"Unknown model: '{self.model_name}'. Choose from {list(MODEL_REGISTRY.keys())}")
-        
+
         entry = MODEL_REGISTRY[self.model_name]
-        
+
         if checkpoint_path is None:
             checkpoint_path = entry['checkpoint_dir'] / entry['best_filename']
             if not checkpoint_path.exists():
                 raise FileNotFoundError(f"Auto-detection failed: Cannot find '{checkpoint_path}'. Please train the model or specify a path with --checkpoint.")
-        
+
         print(f"Loading checkpoint: {checkpoint_path}")
         state_dict = torch.load(checkpoint_path, map_location='cpu')
-        
+
         if isinstance(state_dict, dict) and 'model_state_dict' in state_dict:
             state_dict = state_dict['model_state_dict']
         elif isinstance(state_dict, dict) and 'gen_state_dict' in state_dict:
             state_dict = state_dict['gen_state_dict']
-            
+
         model = entry['class'](**entry['args'])
         model.load_state_dict(state_dict, strict=True)
         return model.to(self.device)
@@ -147,7 +147,7 @@ class SuperResolutionInference:
         lr_tensor = TF.to_tensor(lr_image).unsqueeze(0).to(self.device)
         if self.half:
             lr_tensor = lr_tensor.half()
-            
+
         use_tiling = tile_size > 0 and (lr_tensor.shape[2] > tile_size or lr_tensor.shape[3] > tile_size)
 
         with autocast(device_type=self.device.split(':')[0], enabled=self.half):
@@ -162,7 +162,7 @@ class SuperResolutionInference:
 
         sr_tensor = sr_tensor.squeeze(0).float().cpu().clamp(0, 1)
         return TF.to_pil_image(sr_tensor)
-        
+
     def _infer_full(self, lr_tensor: torch.Tensor) -> torch.Tensor:
         """Inference on the entire image at once."""
         return self.model(lr_tensor)
@@ -170,49 +170,63 @@ class SuperResolutionInference:
     def _infer_diffusion(self, lr_tensor: torch.Tensor) -> torch.Tensor:
         """CRITICAL: Inference using the special denoising loop for diffusion models."""
         from diffusion.scheduler import Scheduler
-        scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS)
-        
+        scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS, device=self.device)
+
         output_shape = (1, 3, lr_tensor.shape[2] * config.SCALE, lr_tensor.shape[3] * config.SCALE)
         img = torch.randn(output_shape, device=self.device)
         if self.half: img = img.half()
 
         lr_upscaled = F.interpolate(lr_tensor, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-        
+
         for i in tqdm(reversed(range(0, scheduler.timesteps)), desc="Denoising", total=scheduler.timesteps, leave=False):
             t = torch.full((1,), i, device=self.device, dtype=torch.long)
             predicted_noise = self.model(img, t, lr_upscaled)
             img = scheduler.sample_previous_timestep(img, t, predicted_noise)
         return img
 
+    # In inference.py
     def _infer_tiled(self, lr_tensor: torch.Tensor, tile_size: int, tile_overlap: int) -> torch.Tensor:
         """Robust inference in patches with reflection padding and a Hann window for smooth blending."""
         b, c, h, w = lr_tensor.shape
         scale = config.SCALE
         stride = tile_size - tile_overlap
-        
-        pad_h = (stride - (h - tile_overlap) % stride) % stride
-        pad_w = (stride - (w - tile_overlap) % stride) % stride
+
+        # --- CORRECTED PADDING LOGIC ---
+        # Calculate required padding for height and width
+        pad_h = max(0, (stride - (h - tile_size) % stride) % stride)
+        pad_w = max(0, (stride - (w - tile_size) % stride) % stride)
+
+        # Apply reflection padding
         lr_padded = F.pad(lr_tensor, [0, pad_w, 0, pad_h], 'reflect')
-        
-        sr_shape = (b, c, (h + pad_h) * scale, (w + pad_w) * scale)
+
+        # Prepare output tensors
+        ph, pw = lr_padded.shape[2:]
+        sr_shape = (b, c, ph * scale, pw * scale)
         sr_padded = torch.zeros(sr_shape, device=self.device)
         blend_weights = torch.zeros(sr_shape, device=self.device)
-        
+
+        # Create a smooth blending window
         window = torch.hann_window(tile_size * scale, periodic=False).unsqueeze(1) * \
                  torch.hann_window(tile_size * scale, periodic=False).unsqueeze(0)
         window = window.to(self.device).expand(1, c, -1, -1)
         if self.half: window = window.half()
-        
-        ph, pw = lr_padded.shape[2:]
-        for y in range(0, ph - tile_overlap, stride):
-            for x in range(0, pw - tile_overlap, stride):
-                lr_tile = lr_padded[:, :, y:y+tile_size, x:x+tile_size]
-                sr_tile = self.model(lr_tile)
-                
-                y_sr, x_sr = y * scale, x * scale
-                sr_padded[:, :, y_sr:y_sr+tile_size*scale, x_sr:x_sr+tile_size*scale] += sr_tile * window
-                blend_weights[:, :, y_sr:y_sr+tile_size*scale, x_sr:x_sr+tile_size*scale] += window
 
+        # Iterate over the padded image
+        for y in range(0, ph, stride):
+            for x in range(0, pw, stride):
+                # Ensure the tile doesn't go out of bounds
+                y_end, x_end = min(y + tile_size, ph), min(x + tile_size, pw)
+                lr_tile = lr_padded[:, :, y:y_end, x:x_end]
+
+                # Run inference on the tile
+                sr_tile = self.model(lr_tile)
+
+                # Place the blended tile into the output tensor
+                y_sr, x_sr = y * scale, x * scale
+                sr_padded[:, :, y_sr:y_sr+sr_tile.shape[2], x_sr:x_sr+sr_tile.shape[3]] += sr_tile * window[:sr_tile.shape[2], :sr_tile.shape[3]]
+                blend_weights[:, :, y_sr:y_sr+sr_tile.shape[2], x_sr:x_sr+sr_tile.shape[3]] += window[:sr_tile.shape[2], :sr_tile.shape[3]]
+
+        # Normalize by the blend weights and crop back to the original size
         sr_image = sr_padded / (blend_weights + 1e-8)
         return sr_image[:, :, :h*scale, :w*scale]
 
@@ -238,31 +252,44 @@ Examples:
     )
     parser.add_argument('--model', type=str, required=True, choices=list(MODEL_REGISTRY.keys()), help="Model to use.")
     parser.add_argument('--checkpoint', type=Path, default=None, help="Path to a specific model checkpoint. (Optional)")
-    
+
     io_group = parser.add_argument_group('Input/Output')
     io_group.add_argument('--input', type=Path, default=None, help="Path to a single input image.")
     io_group.add_argument('--output', type=Path, default=None, help="Path to save the output image. (Optional)")
     io_group.add_argument('--input_dir', type=Path, default=None, help="Directory of images for batch processing.")
     io_group.add_argument('--output_dir', type=Path, default=None, help="Directory to save batch results. (Default: input_dir/sr_results)")
-    
+
     tile_group = parser.add_argument_group('Tiling (for large images)')
     tile_group.add_argument('--tile_size', type=int, default=0, help="Tile size for tiled inference (e.g., 256). 0 disables.")
     tile_group.add_argument('--tile_overlap', type=int, default=32, help="Overlap between tiles in pixels.")
 
     perf_group = parser.add_argument_group('Performance')
+    perf_group.add_argument('--device', type=str, default=None, choices=['cuda', 'mps', 'cpu'], help="Force a specific device (e.g., 'cpu').")
     perf_group.add_argument('--half', action='store_true', help="Enable half-precision (FP16/BF16) for faster inference.")
 
     args = parser.parse_args()
 
     if not args.input and not args.input_dir:
         parser.error("Either --input or --input_dir must be specified.")
-    
-    engine = SuperResolutionInference(model_name=args.model, checkpoint_path=args.checkpoint, half_precision=args.half)
+
+    engine = SuperResolutionInference(model_name=args.model, checkpoint_path=args.checkpoint, half_precision=args.half, device=args.device)
+    diffusion_crop = 128
 
     if args.input:
         output_path = args.output or args.input.parent / f"{args.input.stem}_SR.png"
         print(f"Processing single image: {args.input} -> {output_path}")
         lr_image = Image.open(args.input)
+        if args.model == 'diffusion' and (lr_image.width > diffusion_crop or lr_image.height > diffusion_crop):
+            print("Warning: Large image detected for diffusion model. Center-cropping to a 256x256 patch for now.")
+            lr_image = TF.center_crop(lr_image, (diffusion_crop, diffusion_crop))
+
+            # Save the cropped LR image for comparison
+            lr_crop_path = output_path.parent / f"{args.input.stem}_LR_crop.png"
+
+            lr_image.save(lr_crop_path)
+            print(f"Saved cropped LR input to: {lr_crop_path}")
+
+        # Run inference on the (potentially cropped) image
         sr_image = engine.run(lr_image, tile_size=args.tile_size, tile_overlap=args.tile_overlap)
         sr_image.save(output_path)
 
@@ -274,12 +301,17 @@ Examples:
         for path in tqdm(image_paths, desc="Batch Processing"):
             try:
                 lr_image = Image.open(path)
+                if args.model == 'diffusion' and (lr_image.width > diffusion_crop or lr_image.height > diffusion_crop):
+                    lr_image = TF.center_crop(lr_image, (diffusion_crop, diffusion_crop))
+                    # Optionally save the LR crops in batch mode, or skip to avoid clutter
+                    # lr_crop_path = output_dir / f"{path.stem}_LR_crop.png"
+                    # lr_image.save(lr_crop_path)
                 sr_image = engine.run(lr_image, tile_size=args.tile_size, tile_overlap=args.tile_overlap)
                 output_path = output_dir / f"{path.stem}_SR.png"
                 sr_image.save(output_path)
             except Exception as e:
                 print(f"\nERROR: Failed to process {path.name}: {e}")
-    
+
     print("\nInference complete!")
 
 if __name__ == '__main__':

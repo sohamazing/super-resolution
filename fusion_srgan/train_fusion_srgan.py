@@ -203,20 +203,26 @@ def validate_one_epoch(gen, val_loader, autocast_context, ema=None):
     return total_psnr / len(val_loader)
 
 @torch.no_grad()
-def sample_and_log_images(gen, val_loader, epoch, autocast_context, ema=None):
-    """Logs a visual sample of [Generated | Ground Truth]."""
+def sample_and_log_images(gen, loader, epoch, autocast_context, ema=None):
+    """
+    Generates a sample image from the validation set for visual inspection.
+    """
     gen.eval()
     if ema: ema.apply_shadow()
 
-    lr, hr = next(iter(val_loader))
+    # Get a fresh batch from the validation loader each time
+    lr, hr = next(iter(loader))
     lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+
     with autocast_context:
         fake_hr = gen(lr)
 
+    # Create a grid of [Generated | Ground Truth] for comparison
     grid = torchvision.utils.make_grid(torch.cat([fake_hr, hr], dim=0), normalize=True, nrow=lr.size(0))
     wandb.log({"Validation/samples": wandb.Image(grid, caption=f"Epoch {epoch+1}")})
 
-    if ema: ema.restore()
+    if ema:
+        ema.restore()
     gen.train()
 
 def main(args):
@@ -271,10 +277,6 @@ def main(args):
     ema = EMA(gen) if args.use_ema else None
     if ema:
         ema.register()
-
-    print("Caching validation sample...")
-    val_sample_lr, val_sample_hr = next(iter(val_loader))
-    val_sample_lr, val_sample_hr = val_sample_lr.to(config.DEVICE), val_sample_hr.to(config.DEVICE)
 
     pretrained_file = CHECKPOINT_DIR / "generator_pretrained.pth"
     start_epoch, best_psnr = 0, 0.0
@@ -331,7 +333,7 @@ def main(args):
             # --- Validation and Checkpointing ---
             if (epoch + 1) % config.CHECKPOINT_INTERVAL == 0: # Or your desired interval
                 print(f"\nRunning validation...")
-                psnr = validate_and_visualize(gen, val_sample_lr, val_sample_hr, epoch, autocast_context, ema)
+                psnr = validate_one_epoch(gen, val_loader, autocast_context, ema)
                 print(f"Epoch {epoch+1} | Validation PSNR: {psnr:.2f} dB")
                 wandb.log({"epoch": epoch + 1, "Validation/psnr": psnr})
 
@@ -363,6 +365,8 @@ def main(args):
                 if ema: checkpoint_data['ema_state_dict'] = ema.shadow
                 torch.save(checkpoint_data, latest_ckpt_path)
                 print(f"Checkpoint saved for epoch {epoch + 1}")
+                # Log sample SR images
+                sample_and_log_images(gen, val_loader, epoch, autocast_context, ema)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Train the Fused-GAN model.")

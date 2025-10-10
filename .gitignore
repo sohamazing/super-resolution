@@ -5,6 +5,7 @@
 data/
 div2K-flickr2K-data/
 data_mount/
+results/
 
 # ==================================
 # Model Checkpoints

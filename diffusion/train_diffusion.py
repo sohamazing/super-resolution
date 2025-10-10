@@ -64,7 +64,7 @@ def sample_and_log_images(model, scheduler, loader, epoch):
         predicted_noise = model(img, t, lr_upscaled)
         img = scheduler.sample_previous_timestep(img, t, predicted_noise)
 
-    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_batch], dim=0), normalize=True)
+    grid = torchvision.utils.make_grid(torch.cat([lr_upscaled, img, hr_batch], dim=1), normalize=True)
     wandb.log({"validation_sample": wandb.Image(grid, caption=f"Epoch {epoch + 1}")})
     model.train()
 
@@ -85,7 +85,7 @@ def main(args):
         time_emb_dim=config.DIFFUSION_TIME_EMB_DIM
     ).to(config.DEVICE)
 
-    scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS)
+    scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS, device=config.DEVICE)
     optimizer = optim.Adam(model.parameters(), lr=config.DIFFUSION_LR)
     loss_fn = nn.L1Loss()
     scaler = GradScaler(enabled=(config.DEVICE == 'cuda'))

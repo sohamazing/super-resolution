@@ -9,25 +9,25 @@ def linear_beta_schedule(timesteps):
     return torch.linspace(beta_start, beta_end, timesteps)
 
 class Scheduler:
-    def __init__(self, timesteps=1000):
+    def __init__(self, timesteps=1000, device='cpu'):
         self.timesteps = timesteps
 
         # Define the noise schedule (betas)
-        self.betas = linear_beta_schedule(timesteps)
+        self.betas = linear_beta_schedule(timesteps).to(device)
 
         # Pre-calculate the alpha values based on the betas
-        # These are used in the diffusion formulas and pre-calculating saves computation
-        self.alphas = 1. - self.betas
-        self.alphas_cumprod = torch.cumprod(self.alphas, axis=0) # Cumulative product of alphas
-        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0)
+        self.alphas = (1. - self.betas).to(device)
+        self.alphas_cumprod = torch.cumprod(self.alphas, axis=0).to(device) # Cumulative product of alphas
+        self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0).to(device)
 
         # Pre-calculated values for the forward process (add_noise)
-        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod)
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to(device)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod).to(device)
 
         # Pre-calculated values for the reverse process (sampling)
-        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas)
-        self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod)
+        self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas).to(device)
+        self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod).to(device)
+
 
     def add_noise(self, x_start, t, noise=None):
         """
@@ -67,8 +67,8 @@ class Scheduler:
             return model_mean + torch.sqrt(posterior_variance_t) * noise
 
     def _get_index_from_list(self, values, t, x_shape):
-        """Helper function to get the correct values from pre-calculated lists for a batch of images."""
+        """Helper function now assumes 'values' is already on the correct device."""
         batch_size = t.shape[0]
-        out = values.gather(-1, t.cpu())
+        out = values.gather(-1, t) # No more .to(device) or .cpu() calls needed here, avoiding the MPS bug.
         # Reshape to match the image batch dimensions for broadcasting
-        return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
+        return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
