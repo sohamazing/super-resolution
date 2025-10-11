@@ -7,9 +7,18 @@ class ConvBlock(nn.Module):
     """A standard convolutional block for the U-Net discriminator."""
     def __init__(self, in_channels, out_channels, use_instance_norm=True):
         super().__init__()
+        # self.conv = nn.Sequential(
+        #     nn.Conv2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1,
+        #              bias=False, padding_mode="reflect"),
+        #     nn.InstanceNorm2d(out_channels) if use_instance_norm else nn.Identity(),
+        #     nn.LeakyReLU(0.2, inplace=True),
+        # )
         self.conv = nn.Sequential(
-            nn.Conv2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1,
-                     bias=False, padding_mode="reflect"),
+            # Wrap the convolutional layer with spectral_norm
+            spectral_norm(
+                nn.Conv2d(in_channels, out_channels, kernel_size=4, stride=2, padding=1,
+                         bias=False, padding_mode="reflect")
+            ),
             nn.InstanceNorm2d(out_channels) if use_instance_norm else nn.Identity(),
             nn.LeakyReLU(0.2, inplace=True),
         )

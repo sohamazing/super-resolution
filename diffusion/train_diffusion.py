@@ -75,6 +75,7 @@ def sample_and_log_images(model, scheduler, loader, epoch):
         t = torch.full((img.shape[0],), i, device=config.DEVICE, dtype=torch.long)
         predicted_noise = model(img, t, lr_upscaled)
         sr_batch = scheduler.sample_previous_timestep(img, t, predicted_noise)
+        img = sr_batch
 
     all_images = torch.cat([lr_upscaled, sr_batch, hr_batch], dim=0)
     grid = torchvision.utils.make_grid(all_images, normalize=True, nrow=lr_batch.size(0))
@@ -149,6 +150,10 @@ def main(args):
                 )
                 predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
                 loss = loss_fn(noise, predicted_noise)
+            wandb.log({
+                "train/loss": loss,
+                "train/learning_rate": lr_scheduler.get_last_lr()[0]
+            })
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
@@ -160,10 +165,9 @@ def main(args):
 
         # --- Logging ---
         wandb.log({
-            "epoch": epoch + 1,
-            "train_loss": avg_train_loss,
-            "val_loss": avg_val_loss,
-            "learning_rate": lr_scheduler.get_last_lr()[0]
+            "val/epoch": epoch + 1,
+            "val/avg_train_loss": avg_train_loss,
+            "val/avg_val_loss": avg_val_loss,
         })
         lr_scheduler.step()
 
