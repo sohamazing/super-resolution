@@ -26,20 +26,56 @@ from config import config
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
+# @torch.no_grad()
+# def validate_one_epoch(gen, loader):
+#     """Calculates the average validation PSNR for the generator."""
+#     gen.eval()
+#     total_psnr = 0.0
+#     with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
+#         for lr, hr in tqdm(loader, desc="Validating", leave=False):
+#             lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+#             fake_hr = gen(lr)
+#             mse = F.mse_loss(fake_hr, hr)
+#             psnr = 10 * torch.log10(1 / mse)
+#             total_psnr += psnr.item()
+#     gen.train()
+#     return total_psnr / len(loader)
 @torch.no_grad()
 def validate_one_epoch(gen, loader):
-    """Calculates the average validation PSNR for the generator."""
+    """
+    Calculates and compares the average validation PSNR for the generator's SR output
+    and a standard bicubic upscale.
+    """
     gen.eval()
-    total_psnr = 0.0
+    total_sr_psnr = 0.0
+    total_bicubic_psnr = 0.0
+
     with autocast(device_type=config.DEVICE, dtype=torch.float16, enabled=(config.DEVICE == 'cuda')):
         for lr, hr in tqdm(loader, desc="Validating", leave=False):
             lr, hr = lr.to(config.DEVICE), hr.to(config.DEVICE)
+
+            # --- 1. Super-Resolution (Generator's Output) ---
             fake_hr = gen(lr)
-            mse = F.mse_loss(fake_hr, hr)
-            psnr = 10 * torch.log10(1 / mse)
-            total_psnr += psnr.item()
+            sr_mse = F.mse_loss(fake_hr, hr)
+            sr_psnr = 10 * torch.log10(1 / sr_mse)
+            total_sr_psnr += sr_psnr.item()
+
+            # --- 2. Bicubic Upscale (Baseline) ---
+            # Upscale the low-res image to match the high-res dimensions
+            bicubic_hr = F.interpolate(lr, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
+            bicubic_mse = F.mse_loss(bicubic_hr, hr)
+            bicubic_psnr = 10 * torch.log10(1 / bicubic_mse)
+            total_bicubic_psnr += bicubic_psnr.item()
+
     gen.train()
-    return total_psnr / len(loader)
+
+    # Calculate averages
+    avg_sr_psnr = total_sr_psnr / len(loader)
+    avg_bicubic_psnr = total_bicubic_psnr / len(loader)
+    improvement = 100 * (1 - avg_sr_psnr / avg_bicubic_psnr)
+    print("val_sr_psnr:", avg_sr_psnr, ", val_bicubic_psnr:", avg_bicubic_psnr, ", improvement %:", improvement)
+    return avg_sr_psnr
+
 
 def train_one_epoch(gen, disc, loader, opt_g, opt_d, scaler_g, scaler_d, l1_loss, vgg_loss, adv_loss):
     """A single training loop for one epoch of GAN training."""
