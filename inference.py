@@ -275,7 +275,15 @@ Examples:
     diffusion_crop = 128
 
     if args.input:
-        output_path = args.output or args.output_dir / f"{args.input.stem}_SR.png" or args.input.parent / f"{args.input.stem}_SR.png"
+        if args.output:
+            # If a specific output file is given, use it
+            output_path = args.output
+        elif args.output_dir:
+            # If an output directory is given, build the path inside it
+            output_path = args.output_dir / f"{args.input.stem}_SR.png"
+        else:
+            # Otherwise, save next to the input file
+            output_path = args.input.parent / f"{args.input.stem}_SR.png"
         print(f"Processing single image: {args.input} -> {output_path}")
         
         # Ensure the input image is in RGB format

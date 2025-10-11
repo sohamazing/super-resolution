@@ -268,8 +268,8 @@ def main(args):
     disc = DiscriminatorUNet(features = config.FUSION_SRGAN_DIS_FEATURES).to(config.DEVICE)
     loss_fn = FusedGANLoss()
 
-    opt_g = optim.AdamW(gen.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
-    opt_d = optim.AdamW(disc.parameters(), lr=config.FUSION_SRGAN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+    opt_g = optim.AdamW(gen.parameters(), lr=config.FUSION_SRGAN_GEN_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+    opt_d = optim.AdamW(disc.parameters(), lr=config.FUSION_SRGAN_DIS_LR, betas=(0.9, 0.999), weight_decay=1e-4)
 
     scheduler_g = optim.lr_scheduler.CosineAnnealingLR(opt_g, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)
     scheduler_d = optim.lr_scheduler.CosineAnnealingLR(opt_d, T_max=config.FUSION_SRGAN_EPOCHS, eta_min=1e-6)

@@ -52,11 +52,12 @@ class SuperResConfig:
     ESRGAN_EPOCHS: int = 1000
     ESRGAN_LR: float = 2e-4
     ESRGAN_NUM_FEATURES: int = 64
-    ESRGAN_NUM_RRDB: int = 23
+    ESRGAN_NUM_RRDB: int = 16 # 23
 
     # --- Fusion-SRGAN Specific ---
     FUSION_SRGAN_EPOCHS: int = 1000
-    FUSION_SRGAN_LR: float = 2e-4 # 1e-4
+    FUSION_SRGAN_GEN_LR: float = 2e-4 # 1e-4
+    FUSION_SRGAN_DIS_LR: float = 5e-5
     FUSION_SRGAN_GEN_FEATURES: list = field(default_factory=lambda: [48, 96, 128]) # larger = [64, 128, 256]
     FUSION_SRGAN_DIS_FEATURES: list = field(default_factory=lambda: [32, 64, 128, 256]) # larger = [64, 128, 256, 512]
     FUSION_SRGAN_EMBED_DIM: int = 180
