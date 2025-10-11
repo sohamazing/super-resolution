@@ -27,24 +27,39 @@ from config import config  # Central config file
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-
 @torch.no_grad()
 def validate_one_epoch(model, loader, scheduler, loss_fn, device):
     """Calculate average validation loss for one epoch."""
     model.eval()
     total_val_loss = 0.0
+    total_bicubic_loss = 0.0
     with autocast(device_type=device, dtype=torch.float16, enabled=(device != 'cpu')):
         for lr_batch, hr_batch in tqdm(loader, desc="Validating", leave=False):
             lr_batch, hr_batch = lr_batch.to(device), hr_batch.to(device)
             t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=device).long()
             noise = torch.randn_like(hr_batch)
-            noisy_hr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
+            noisy_sr_batch = scheduler.add_noise(x_start=hr_batch, t=t, noise=noise)
             lr_upscaled = F.interpolate(lr_batch, scale_factor=config.SCALE, mode='bicubic', align_corners=False)
-            predicted_noise = model(noisy_hr_batch, t, lr_upscaled)
-            total_val_loss += loss_fn(noise, predicted_noise).item()
-    model.train()
-    return total_val_loss / len(loader)
+            predicted_noise = model(noisy_sr_batch, t, lr_upscaled)
 
+            # Loss func for MSE (noisy_sr_batch - hr_batch)
+            # Loss func for MSE (lr upscaled - hr_batch))
+            total_val_loss += loss_fn(noise, predicted_noise).item()
+            total_bicubic_loss += loss_fn(lr_upscaled, hr_batch).item()
+
+    avg_bicubic_loss = total_bicubic_loss / len(loader)
+    avg_val_loss = total_val_loss / len(loader)
+    
+    # Print the comparison
+    print(f"\nValidation Complete:")
+    print(f"  - Model Prediction Loss : {avg_val_loss:.6f}")
+    print(f"  - Bicubic Upscale Loss  : {avg_bicubic_loss:.6f}\n")
+    print(f"  - Improvement %: {100 * (1-(avg_val_loss/avg_bicubic_loss)):.6f}\n")
+    model.train()
+
+    # Return a dictionary to log both values easily
+    # return {"model_loss": avg_val_loss, "bicubic_loss": avg_bicubic_loss}
+    return avg_val_loss
 
 @torch.no_grad()
 def sample_and_log_images(model, scheduler, loader, epoch):
@@ -59,9 +74,9 @@ def sample_and_log_images(model, scheduler, loader, epoch):
     for i in tqdm(reversed(range(0, scheduler.timesteps)), desc="Sampling", total=scheduler.timesteps, leave=False):
         t = torch.full((img.shape[0],), i, device=config.DEVICE, dtype=torch.long)
         predicted_noise = model(img, t, lr_upscaled)
-        img = scheduler.sample_previous_timestep(img, t, predicted_noise)
+        sr_batch = scheduler.sample_previous_timestep(img, t, predicted_noise)
 
-    all_images = torch.cat([lr_upscaled, img, hr_batch], dim=0)
+    all_images = torch.cat([lr_upscaled, sr_batch, hr_batch], dim=0)
     grid = torchvision.utils.make_grid(all_images, normalize=True, nrow=lr_batch.size(0))
     wandb.log({"validation_sample": wandb.Image(grid, caption=f"Epoch {epoch + 1}")})
     model.train()

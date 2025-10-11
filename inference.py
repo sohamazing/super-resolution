@@ -23,11 +23,11 @@ Usage:
 import torch
 from torch import nn
 from torch.amp import autocast
-import torch.nn.functional as F
-from pathlib import Path
 import torchvision.transforms.functional as TF
+import torch.nn.functional as F
 from tqdm import tqdm
 from PIL import Image
+from pathlib import Path
 import argparse
 from typing import Optional
 import sys
@@ -168,7 +168,7 @@ class SuperResolutionInference:
         return self.model(lr_tensor)
 
     def _infer_diffusion(self, lr_tensor: torch.Tensor) -> torch.Tensor:
-        """CRITICAL: Inference using the special denoising loop for diffusion models."""
+        """Inference using the special denoising loop for diffusion models."""
         from diffusion.scheduler import Scheduler
         scheduler = Scheduler(timesteps=config.DIFFUSION_TIMESTEPS, device=self.device)
 
@@ -184,7 +184,6 @@ class SuperResolutionInference:
             img = scheduler.sample_previous_timestep(img, t, predicted_noise)
         return img
 
-    # In inference.py
     def _infer_tiled(self, lr_tensor: torch.Tensor, tile_size: int, tile_overlap: int) -> torch.Tensor:
         """Robust inference in patches with reflection padding and a Hann window for smooth blending."""
         b, c, h, w = lr_tensor.shape
@@ -278,20 +277,35 @@ Examples:
     if args.input:
         output_path = args.output or args.input.parent / f"{args.input.stem}_SR.png"
         print(f"Processing single image: {args.input} -> {output_path}")
-        lr_image = Image.open(args.input)
+        
+        # Ensure the input image is in RGB format
+        lr_image = Image.open(args.input).convert("RGB")
+
+        # Handle cropping for diffusion model if necessary
         if args.model == 'diffusion' and (lr_image.width > diffusion_crop or lr_image.height > diffusion_crop):
-            print("Warning: Large image detected for diffusion model. Center-cropping to a 256x256 patch for now.")
+            print(f"Warning: Large image for diffusion model. Center-cropping to ({diffusion_crop}x{diffusion_crop}).")
             lr_image = TF.center_crop(lr_image, (diffusion_crop, diffusion_crop))
+        
+        # --- Create and Save Bicubic Upscale for Comparison (using Pillow) ---
+        print("Generating bicubic upscale for comparison...")
+        
+        # 1. Calculate the target size
+        target_width = lr_image.width * config.SCALE
+        target_height = lr_image.height * config.SCALE
 
-            # Save the cropped LR image for comparison
-            lr_crop_path = output_path.parent / f"{args.input.stem}_LR_crop.png"
+        # 2. Use Pillow's resize method with the BICUBIC filter
+        bicubic_image = lr_image.resize((target_width, target_height), resample=Image.Resampling.BICUBIC)
 
-            lr_image.save(lr_crop_path)
-            print(f"Saved cropped LR input to: {lr_crop_path}")
-
-        # Run inference on the (potentially cropped) image
+        # 3. Define the output path and save the image
+        bicubic_path = output_path.parent / f"{args.input.stem}_bicubic.png"
+        bicubic_image.save(bicubic_path)
+        print(f"Saved bicubic upscale to: {bicubic_path}")
+        
+        # --- Run Model Inference ---
+        # Run inference on the (potentially cropped) original lr_image
         sr_image = engine.run(lr_image, tile_size=args.tile_size, tile_overlap=args.tile_overlap)
         sr_image.save(output_path)
+        print(f"Saved model's SR output to: {output_path}")
 
     if args.input_dir:
         output_dir = args.output_dir or args.input_dir / "sr_results"
