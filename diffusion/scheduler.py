@@ -1,74 +1,337 @@
 # diffusion/scheduler.py
+"""
+Diffusion noise schedulers with both DDPM and DDIM sampling support.
+- DDPM: Original stochastic sampling (slower, higher quality)
+- DDIM: Deterministic sampling (faster, configurable steps)
+"""
 import torch
 import torch.nn.functional as F
+import math
 
-def linear_beta_schedule(timesteps):
-    """Creates a linear noise schedule from beta_start to beta_end."""
-    beta_start = 0.0001
-    beta_end = 0.02
+def cosine_beta_schedule(timesteps, s=0.008):
+    """
+    Cosine schedule as proposed in 'Improved Denoising Diffusion Probabilistic Models'.
+    More stable than linear schedule for image generation.
+    
+    Args:
+        timesteps: Number of diffusion steps
+        s: Small offset to prevent singularities
+    Returns:
+        torch.Tensor: Beta values for each timestep
+    """
+    steps = timesteps + 1
+    x = torch.linspace(0, timesteps, steps)
+    alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+    alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
+    betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
+    return torch.clip(betas, 0.0001, 0.9999)
+
+
+def linear_beta_schedule(timesteps, beta_start=0.0001, beta_end=0.02):
+    """
+    Linear schedule for beta values (original DDPM).
+    
+    Args:
+        timesteps: Number of diffusion steps
+        beta_start: Starting beta value
+        beta_end: Ending beta value
+    Returns:
+        torch.Tensor: Beta values for each timestep
+    """
     return torch.linspace(beta_start, beta_end, timesteps)
 
-class Scheduler:
-    def __init__(self, timesteps=1000, device='cpu'):
+
+class DDPMScheduler:
+    """
+    DDPM (Denoising Diffusion Probabilistic Models) Scheduler.
+    
+    Original stochastic sampling - slower but potentially higher quality.
+    Uses the full Markov chain with added noise at each step.
+    """
+    def __init__(self, timesteps=1000, schedule='cosine', device='cpu'):
+        """
+        Args:
+            timesteps: Total number of diffusion steps
+            schedule: 'cosine' or 'linear' beta schedule
+            device: torch device (cpu, cuda, mps)
+        """
         self.timesteps = timesteps
-
-        # Define the noise schedule (betas)
-        self.betas = linear_beta_schedule(timesteps).to(device)
-
-        # Pre-calculate the alpha values based on the betas
-        self.alphas = (1. - self.betas).to(device)
-        self.alphas_cumprod = torch.cumprod(self.alphas, axis=0).to(device) # Cumulative product of alphas
+        self.device = device
+        self.schedule_type = schedule
+        
+        # Define noise schedule
+        if schedule == 'cosine':
+            self.betas = cosine_beta_schedule(timesteps).to(device)
+        else:
+            self.betas = linear_beta_schedule(timesteps).to(device)
+        
+        # Pre-compute useful values for efficiency
+        self.alphas = (1.0 - self.betas).to(device)
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0).to(device)
         self.alphas_cumprod_prev = F.pad(self.alphas_cumprod[:-1], (1, 0), value=1.0).to(device)
-
-        # Pre-calculated values for the forward process (add_noise)
+        
+        # For forward process (q)
         self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to(device)
-        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1. - self.alphas_cumprod).to(device)
-
-        # Pre-calculated values for the reverse process (sampling)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod).to(device)
+        
+        # For reverse process (p)
         self.sqrt_recip_alphas = torch.sqrt(1.0 / self.alphas).to(device)
-        self.posterior_variance = self.betas * (1. - self.alphas_cumprod_prev) / (1. - self.alphas_cumprod).to(device)
-
-
+        
+        # Posterior variance for sampling
+        self.posterior_variance = (
+            self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        ).to(device)
+        
+        # Clip for numerical stability
+        self.posterior_variance = torch.clamp(self.posterior_variance, min=1e-20)
+    
     def add_noise(self, x_start, t, noise=None):
         """
-        Takes a clean image and a timestep 't' and returns a noisy version.
-        This is the 'forward process' and uses a closed-form solution to jump to any 't'.
+        Forward diffusion: Add noise to clean images.
+        
+        Uses closed-form solution: q(x_t | x_0) = √(ᾱ_t) * x_0 + √(1-ᾱ_t) * ε
+        
+        Args:
+            x_start: (B, C, H, W) - clean images
+            t: (B,) - timestep for each image in batch
+            noise: (B, C, H, W) - optional pre-generated noise
+        Returns:
+            (B, C, H, W) - noisy images at timestep t
         """
         if noise is None:
             noise = torch.randn_like(x_start)
-
-        # Get the pre-calculated values for the given timestep 't'
-        sqrt_alphas_cumprod_t = self._get_index_from_list(self.sqrt_alphas_cumprod, t, x_start.shape)
-        sqrt_one_minus_alphas_cumprod_t = self._get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_start.shape)
-
-        # Apply the noise formula: noisy_image = sqrt(alpha_cumprod_t) * x_start + sqrt(1 - alpha_cumprod_t) * noise
-        noisy_image = sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
-        return noisy_image
-
-    def sample_previous_timestep(self, x_t, t, predicted_noise):
+        
+        # Get pre-computed values for timestep t
+        sqrt_alphas_cumprod_t = self._extract(self.sqrt_alphas_cumprod, t, x_start.shape)
+        sqrt_one_minus_alphas_cumprod_t = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x_start.shape
+        )
+        
+        # Apply noise
+        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+    
+    def sample_prev_timestep(self, x_t, t, predicted_noise, clip_denoised=True):
         """
-        Takes the model's noise prediction and the current noisy image 'x_t'
-        to calculate the slightly cleaner image at step 't-1'. This is the 'reverse process'.
+        DDPM reverse diffusion: Remove noise to get cleaner image (stochastic).
+        
+        Uses the reverse process: p(x_{t-1} | x_t, x_0) with added noise
+        
+        Args:
+            x_t: (B, C, H, W) - noisy image at timestep t
+            t: (B,) - current timestep
+            predicted_noise: (B, C, H, W) - model's noise prediction
+            clip_denoised: Whether to clip predicted x_0 to [-1, 1]
+        Returns:
+            (B, C, H, W) - less noisy image at timestep t-1
         """
-        # Get the pre-calculated values for the given timestep 't'
-        betas_t = self._get_index_from_list(self.betas, t, x_t.shape)
-        sqrt_one_minus_alphas_cumprod_t = self._get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_t.shape)
-        sqrt_recip_alphas_t = self._get_index_from_list(self.sqrt_recip_alphas, t, x_t.shape)
-
-        # Calculate the mean of the distribution for the previous timestep using the model's prediction
-        model_mean = sqrt_recip_alphas_t * (x_t - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t)
-
-        # Get the variance and add a small amount of random noise (except for the last step)
-        posterior_variance_t = self._get_index_from_list(self.posterior_variance, t, x_t.shape)
+        # Extract values for current timestep
+        betas_t = self._extract(self.betas, t, x_t.shape)
+        sqrt_one_minus_alphas_cumprod_t = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x_t.shape
+        )
+        sqrt_recip_alphas_t = self._extract(self.sqrt_recip_alphas, t, x_t.shape)
+        
+        # Predict x_0 from x_t and noise
+        pred_x0 = sqrt_recip_alphas_t * (
+            x_t - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t
+        )
+        
+        # Clip predicted x_0 for stability
+        if clip_denoised:
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+        
+        # Compute mean of p(x_{t-1} | x_t, x_0)
+        model_mean = sqrt_recip_alphas_t * (
+            x_t - betas_t * predicted_noise / sqrt_one_minus_alphas_cumprod_t
+        )
+        
+        # Add noise (DDPM is stochastic, except for last step)
         if t[0].item() == 0:
             return model_mean
         else:
+            posterior_variance_t = self._extract(self.posterior_variance, t, x_t.shape)
             noise = torch.randn_like(x_t)
             return model_mean + torch.sqrt(posterior_variance_t) * noise
-
-    def _get_index_from_list(self, values, t, x_shape):
-        """Helper function now assumes 'values' is already on the correct device."""
+    
+    def _extract(self, values, t, shape):
+        """
+        Extract values at timestep t and reshape for broadcasting.
+        
+        Args:
+            values: (timesteps,) - pre-computed values
+            t: (B,) - timestep indices
+            shape: target shape for broadcasting
+        Returns:
+            Reshaped tensor for broadcasting
+        """
         batch_size = t.shape[0]
-        out = values.gather(-1, t) # No more .to(device) or .cpu() calls needed here, avoiding the MPS bug.
-        # Reshape to match the image batch dimensions for broadcasting
-        return out.reshape(batch_size, *((1,) * (len(x_shape) - 1)))
+        out = values.gather(-1, t)
+        return out.reshape(batch_size, *((1,) * (len(shape) - 1)))
+    
+    def __repr__(self):
+        return (
+            f"DDPMScheduler(\n"
+            f"  timesteps={self.timesteps},\n"
+            f"  schedule='{self.schedule_type}',\n"
+            f"  device={self.device}\n"
+            f")"
+        )
+
+
+class DDIMScheduler:
+    """
+    DDIM (Denoising Diffusion Implicit Models) Scheduler.
+    
+    Deterministic sampling - much faster with configurable steps.
+    Can use fewer steps than training (e.g., 50 instead of 1000).
+    """
+    def __init__(self, timesteps=1000, schedule='cosine', device='cpu'):
+        """
+        Args:
+            timesteps: Total number of training diffusion steps
+            schedule: 'cosine' or 'linear' beta schedule
+            device: torch device (cpu, cuda, mps)
+        """
+        self.timesteps = timesteps
+        self.device = device
+        self.schedule_type = schedule
+        
+        # Define noise schedule (same as DDPM)
+        if schedule == 'cosine':
+            self.betas = cosine_beta_schedule(timesteps).to(device)
+        else:
+            self.betas = linear_beta_schedule(timesteps).to(device)
+        
+        # Pre-compute useful values
+        self.alphas = (1.0 - self.betas).to(device)
+        self.alphas_cumprod = torch.cumprod(self.alphas, dim=0).to(device)
+        
+        # For forward process
+        self.sqrt_alphas_cumprod = torch.sqrt(self.alphas_cumprod).to(device)
+        self.sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - self.alphas_cumprod).to(device)
+    
+    def add_noise(self, x_start, t, noise=None):
+        """
+        Forward diffusion: Add noise to clean images.
+        Same as DDPM.
+        
+        Args:
+            x_start: (B, C, H, W) - clean images
+            t: (B,) - timestep for each image in batch
+            noise: (B, C, H, W) - optional pre-generated noise
+        Returns:
+            (B, C, H, W) - noisy images at timestep t
+        """
+        if noise is None:
+            noise = torch.randn_like(x_start)
+        
+        sqrt_alphas_cumprod_t = self._extract(self.sqrt_alphas_cumprod, t, x_start.shape)
+        sqrt_one_minus_alphas_cumprod_t = self._extract(
+            self.sqrt_one_minus_alphas_cumprod, t, x_start.shape
+        )
+        
+        return sqrt_alphas_cumprod_t * x_start + sqrt_one_minus_alphas_cumprod_t * noise
+    
+    def sample_prev_timestep(self, x_t, t, t_prev, predicted_noise, eta=0.0, clip_denoised=True):
+        """
+        DDIM reverse diffusion: Remove noise deterministically (or semi-stochastic with eta > 0).
+        
+        Args:
+            x_t: (B, C, H, W) - noisy image at timestep t
+            t: (B,) - current timestep
+            t_prev: (B,) - previous timestep (can skip steps)
+            predicted_noise: (B, C, H, W) - model's noise prediction
+            eta: Stochasticity parameter (0=deterministic, 1=DDPM-like)
+            clip_denoised: Whether to clip predicted x_0 to [-1, 1]
+        Returns:
+            (B, C, H, W) - less noisy image at timestep t_prev
+        """
+        # Get alpha values for current and previous timesteps
+        alpha_cumprod_t = self._extract(self.alphas_cumprod, t, x_t.shape)
+        
+        # Handle t_prev = -1 case (final step)
+        if t_prev[0].item() < 0:
+            alpha_cumprod_t_prev = torch.ones_like(alpha_cumprod_t)
+        else:
+            alpha_cumprod_t_prev = self._extract(self.alphas_cumprod, t_prev, x_t.shape)
+        
+        # Predict x_0
+        pred_x0 = (x_t - torch.sqrt(1 - alpha_cumprod_t) * predicted_noise) / torch.sqrt(alpha_cumprod_t)
+        
+        # Clip for stability
+        if clip_denoised:
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+        
+        # Compute variance
+        sigma_t = eta * torch.sqrt(
+            (1 - alpha_cumprod_t_prev) / (1 - alpha_cumprod_t) *
+            (1 - alpha_cumprod_t / alpha_cumprod_t_prev)
+        )
+        
+        # Compute direction pointing to x_t
+        pred_dir = torch.sqrt(1 - alpha_cumprod_t_prev - sigma_t**2) * predicted_noise
+        
+        # Compute x_{t-1}
+        x_prev = torch.sqrt(alpha_cumprod_t_prev) * pred_x0 + pred_dir
+        
+        # Add noise if eta > 0
+        if eta > 0 and t[0].item() > 0:
+            noise = torch.randn_like(x_t)
+            x_prev = x_prev + sigma_t * noise
+        
+        return x_prev
+    
+    def get_sampling_timesteps(self, num_inference_steps):
+        """
+        Get subset of timesteps for faster sampling.
+        
+        Args:
+            num_inference_steps: Number of steps to use for inference
+        Returns:
+            List of timesteps to use
+        """
+        # Evenly spaced timesteps
+        step = self.timesteps // num_inference_steps
+        timesteps = list(range(0, self.timesteps, step))[:num_inference_steps]
+        return list(reversed(timesteps))
+    
+    def _extract(self, values, t, shape):
+        """Extract values at timestep t and reshape for broadcasting."""
+        batch_size = t.shape[0]
+        out = values.gather(-1, t)
+        return out.reshape(batch_size, *((1,) * (len(shape) - 1)))
+    
+    def __repr__(self):
+        return (
+            f"DDIMScheduler(\n"
+            f"  timesteps={self.timesteps},\n"
+            f"  schedule='{self.schedule_type}',\n"
+            f"  device={self.device}\n"
+            f")"
+        )
+
+
+# Factory function for easy scheduler creation
+def create_scheduler(scheduler_type='ddpm', timesteps=1000, schedule='cosine', device='cpu'):
+    """
+    Factory function to create appropriate scheduler.
+    
+    Args:
+        scheduler_type: 'ddpm' or 'ddim'
+        timesteps: Number of training timesteps
+        schedule: 'cosine' or 'linear'
+        device: torch device
+    
+    Returns:
+        Scheduler instance
+    """
+    if scheduler_type.lower() == 'ddpm':
+        return DDPMScheduler(timesteps=timesteps, schedule=schedule, device=device)
+    elif scheduler_type.lower() == 'ddim':
+        return DDIMScheduler(timesteps=timesteps, schedule=schedule, device=device)
+    else:
+        raise ValueError(f"Unknown scheduler type: {scheduler_type}. Must be 'ddpm' or 'ddim'")
+
+
+# Backward compatibility
+# Scheduler = DDPMScheduler
