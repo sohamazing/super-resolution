@@ -287,7 +287,7 @@ def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn
         #         'ema_state_dict': ema.shadow if ema else None,
         #         'lr_scheduler_state_dict': lr_scheduler.state_dict() if lr_scheduler else None
         #     }, ckpt_path)
-        #     print(f"💾 Intermediate checkpoint saved at step {step+1}")
+        #     print(f"Intermediate checkpoint saved at step {step+1}")
 
     avg_loss = total_loss / len(train_loader)
     return avg_loss
