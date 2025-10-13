@@ -112,7 +112,7 @@ class TrainDataset(SuperResDataset):
         return lr_tensor, hr_tensor
 
 
-class TrainDatasetAugmented(TrainDatasetCrop):
+class TrainDatasetAugmented(TrainDataset):
     """
     Virtually augments the dataset by a multiplier factor.
     For each original image, it provides 'multiplier' number of unique random crops per epoch.
