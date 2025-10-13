@@ -387,7 +387,7 @@ def main(args):
 
     # Select the training dataset class
     TrainData = TrainDatasetAugmented if config.AUGMENT_FACTOR > 1 else TrainDataset
-    kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
+    train_kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
     if config.AUGMENT_FACTOR > 1:
         train_kwargs["multiplier"] = config.AUGMENT_FACTOR
     train_dataset = TrainData(**train_kwargs)
