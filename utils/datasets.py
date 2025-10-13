@@ -173,7 +173,7 @@ class ValDatasetGrid(SuperResDataset):
     def __init__(self, hr_dir: str, lr_dir: str):
         super().__init__(hr_dir, lr_dir)
         self.patch_size_hr = config.HR_CROP_SIZE
-        self.stride_hr = config.HR_CROP_SIZE # no overlap. 50% overlap: config.HR_CROP_SIZE//2
+        self.stride_hr = config.STEP # no overlap. 50% overlap: config.HR_CROP_SIZE//2
         
         self.patch_map = []
         print("Pre-calculating validation grid patches...")

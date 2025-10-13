@@ -21,11 +21,11 @@ import psutil
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
-from diffusion.diffusion_model import DiffusionUNetLite as DiffusionUNet # smaller
-# from diffusion.diffusion_model import DiffusionUNet # larger
+from config import config
+from diffusion.diffusion_model import DiffusionUNet, DiffusionUNetLite
 from diffusion.scheduler import create_scheduler, DDPMScheduler, DDIMScheduler
 from utils.datasets import TrainDataset, TrainDatasetAugmented, ValDataset, ValDatasetGrid
-from config import config
+
 
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
@@ -128,19 +128,10 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
         'improvement_pct': improvement
     }
 
-
 @torch.no_grad()
 def sample_images(model, scheduler, val_loader, device, scheduler_type='ddpm',
                  num_inference_steps=None, ddim_eta=0.0):
-    """
-    Generate SR images using the full denoising process.
-
-    Args:
-        scheduler_type: 'ddpm' or 'ddim'
-        num_inference_steps: Number of denoising steps
-                            (DDPM: must equal training steps, DDIM: can be less)
-        ddim_eta: DDIM stochasticity (0=deterministic, 1=stochastic like DDPM)
-    """
+    """Generate SR images using the full denoising process."""
     model.eval()
 
     # Get one batch
@@ -159,16 +150,17 @@ def sample_images(model, scheduler, val_loader, device, scheduler_type='ddpm',
     # Start from pure noise
     img = torch.randn_like(hr_batch)
 
-    # Get sampling timesteps based on scheduler type
-    if scheduler_type == 'ddim' and isinstance(scheduler, DDIMScheduler):
+    # Determine sampling method
+    is_ddim = isinstance(scheduler, DDIMScheduler)
+
+    if is_ddim:
         # DDIM: Can use fewer steps
         if num_inference_steps is None:
             num_inference_steps = config.DIFFUSION_DDIM_STEPS
-
         timesteps = scheduler.get_sampling_timesteps(num_inference_steps)
 
         # DDIM sampling loop
-        for i, t_idx in enumerate(tqdm(timesteps, desc=f"Sampling (DDIM, {num_inference_steps} steps)", leave=False)):
+        for i, t_idx in enumerate(tqdm(timesteps, desc=f"DDIM ({num_inference_steps} steps)", leave=False)):
             t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
 
             # Get previous timestep
@@ -177,34 +169,26 @@ def sample_images(model, scheduler, val_loader, device, scheduler_type='ddpm',
             else:
                 t_prev = torch.full((img.shape[0],), -1, device=device, dtype=torch.long)
 
-            # Predict noise
+            # Predict and denoise
             pred_noise = model(img, t, lr_upscaled)
-
-            # DDIM step
             img = scheduler.sample_prev_timestep(img, t, t_prev, pred_noise, eta=ddim_eta)
 
     else:
         # DDPM: Must use all training steps
-        if num_inference_steps is None:
-            num_inference_steps = scheduler.timesteps
-
         timesteps = list(range(0, scheduler.timesteps))[::-1]
 
         # DDPM sampling loop
-        for t_idx in tqdm(timesteps, desc=f"Sampling (DDPM, {num_inference_steps} steps)", leave=False):
+        for t_idx in tqdm(timesteps, desc=f"DDPM ({len(timesteps)} steps)", leave=False):
             t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
 
-            # Predict noise
+            # Predict and denoise
             pred_noise = model(img, t, lr_upscaled)
-
-            # DDPM step (stochastic)
             img = scheduler.sample_prev_timestep(img, t, pred_noise)
 
     model.train()
 
     # Create comparison grid: [LR_upscaled | Model_SR | GT_HR]
     comparison = torch.cat([lr_upscaled, img, hr_batch], dim=0)
-
     return comparison
 
 
@@ -271,7 +255,7 @@ def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn
             wandb.log({
                 'train/loss': loss.item(),
                 'train/step': step_global + step,
-                'lr': optimizer.param_groups[0]['lr']
+                'train/lr': optimizer.param_groups[0]['lr']
             })
 
         if step % 500 == 0:
@@ -373,6 +357,9 @@ def main(args):
         name=f"diffusion-{config.DIFFUSION_TIMESTEPS}steps"
     )
 
+    if args.model_type:
+        config.DIFFUSION_MODEL_TYPE = args.model_type
+
     # Device setup
     device = config.DEVICE
     use_amp = (device == 'cuda')
@@ -414,20 +401,37 @@ def main(args):
         pin_memory=(device == "cuda")
     )
 
-    print(f"Training samples: {len(train_dataset)}")
-    print(f"Validation samples: {len(val_dataset)}")
-
     # Initialize model
-    model = DiffusionUNet(
-        in_channels=6,  # 3 (noisy image) + 3 (LR condition)
-        out_channels=3,
-        features=config.DIFFUSION_FEATURES,
-        time_emb_dim=config.DIFFUSION_TIME_EMB_DIM,
-        dropout=0.1,
-        grad_ckpt=config.DIFFUSION_GRAD_CHECKPOINT
-    ).to(device)
+    model_type = getattr(config, "DIFFUSION_MODEL_TYPE", None)
 
-    print(f"Model parameters: {model.get_num_params():,}")
+    # 2. Build the correct model with proper kwargs
+    if model_type == "custom":
+        model = DiffusionUNet(
+            in_channels=6,  # (3 noisy + 3 LR conditional)
+            out_channels=3,
+            features=config.DIFFUSION_FEATURES,
+            time_emb_dim=config.DIFFUSION_TIME_EMB_DIM,
+            dropout=0.1,
+            grad_ckpt=config.DIFFUSION_GRAD_CHECKPOINT
+        )
+    elif model_type == "default":
+        model = DiffusionUNetLite(
+            in_channels=6,
+            out_channels=3
+        )
+    else:
+        raise ValueError(f"Unknown DIFFUSION_MODEL_TYPE '{model_type}'. Valid options: ['custom', 'default'].")
+
+    model = model.to(device)
+    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"-- Model type --: {model_type}")
+    print(f"Model parameters: {total_params:,}")
+    wandb.config.update({
+        "model_type": model_type,
+        "model_parameters": total_params
+    }, allow_val_change=True)
+
+    print(f"Model get_num_params: {model.get_num_params():,}")
 
     # Initialize scheduler based on config
     scheduler = create_scheduler(
@@ -437,7 +441,7 @@ def main(args):
         device=device
     )
 
-    print(f"Scheduler: {scheduler}")
+    print(f"-- Scheduler --: {scheduler}")
     print(f"Sampling method: {config.DIFFUSION_SCHEDULER_TYPE.upper()}")
     if config.DIFFUSION_SCHEDULER_TYPE == 'ddim':
         print(f"DDIM inference steps: {config.DIFFUSION_DDIM_STEPS}")
@@ -446,7 +450,7 @@ def main(args):
     # Initialize EMA
     ema = EMA(model, decay=0.9999) if args.use_ema else None
     if ema:
-        print("✅ EMA enabled")
+        print("EMA enabled")
 
     # Optimizer and scheduler
     optimizer = optim.AdamW(
@@ -478,22 +482,39 @@ def main(args):
 
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            start_epoch = checkpoint['epoch']
-            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
+            if 'scheduler_state_dict' in checkpoint:
+                lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            else:
+                print("No scheduler state found in checkpoint. Reinitializing scheduler.")
 
             if ema and 'ema_state_dict' in checkpoint:
                 ema.shadow = checkpoint['ema_state_dict']
+            else:
+                print("No EMA state found in checkpoint.")
 
+            start_epoch = checkpoint['epoch']
+            best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             print(f"   Resumed from epoch {start_epoch}")
             print(f"   Best validation loss: {best_val_loss:.6f}")
         else:
             print("No checkpoint found, starting from scratch")
 
     # Print Overview
-    print(f"Training samples: {len(train_dataset)}")
-    print(f"Validation samples: {len(val_dataset)}")
-    print_training_summary(model, scheduler, config, device, use_amp, len(train_dataset))
+    num_train_patches = len(train_dataset)
+    num_val_patches = len(val_dataset)
+    total_patches = num_train_patches + num_val_patches
+    train_ratio = num_train_patches / total_patches
+    val_ratio = num_val_patches / total_patches
+
+    print_training_summary(model, scheduler, config, device, use_amp, num_train_patches)
+
+    print(f"\n{'='*80}")
+    print(f"DATASET PATCH SPLIT SUMMARY")
+    print(f"{'-'*80}")
+    print(f"  Training patches (random crops):     {num_train_patches:,}")
+    print(f"  Validation patches (deterministic):  {num_val_patches:,}")
+    print(f"  Ratio (train : val):                 {train_ratio:.2f} : {val_ratio:.2f}")
+    print(f"{'='*80}\n")
 
     # Training loop
     print("\n" + "="*60)
@@ -508,7 +529,7 @@ def main(args):
         )
 
         # Validate
-        if (epoch + 1) % 5 == 0 or epoch == 0:
+        if (epoch + 1) % config.CHECKPOINT_INTERVAL == 0 or epoch == 0:
             # Apply EMA weights for validation
             if ema:
                 ema.apply_shadow()
@@ -530,12 +551,12 @@ def main(args):
 
             wandb.log({
                 'epoch': epoch + 1,
-                'train/epoch_loss': avg_train_loss,
-                'val/loss': val_metrics['val_loss'],
+                'val/avg_train_loss': avg_train_loss,
+                'val/avg_val_loss': val_metrics['val_loss'],
                 'val/bicubic_mse': val_metrics['bicubic_mse'],
                 'val/model_mse': val_metrics['model_mse'],
                 'val/improvement_pct': val_metrics['improvement_pct'],
-                'train/lr': lr_scheduler.get_last_lr()[0]
+                # 'train/lr': lr_scheduler.get_last_lr()[0]
             })
 
             # Save checkpoint
@@ -562,7 +583,7 @@ def main(args):
                 print(f" New best model saved! Loss: {best_val_loss:.6f}")
 
             # Generate sample images
-            if (epoch + 1) % 10 == 0:
+            if (epoch + 1) % config.SAMPLE_INTERVAL == 0:
                 print(" Generating sample images...")
                 if ema:
                     ema.apply_shadow()
@@ -619,6 +640,14 @@ if __name__ == "__main__":
         action="store_true",
         help="Use Exponential Moving Average"
     )
+    parser.add_argument(
+        "--model_type",
+        type=str,
+        default=None,
+        choices=["default", "custom"],
+        help="Override config to select model type"
+    )
+
 
     args = parser.parse_args()
     main(args)

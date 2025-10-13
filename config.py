@@ -41,7 +41,7 @@ class SuperResConfig:
 
     # --- Data Processing Parameters ---
     PATCH_SIZE: int = 128
-    STEP: int = 128
+    STEP: int = 256 # PATCH_SIZE // 2 # for 50% overlap
     SCALE: int = 4
     HR_CROP_SIZE: int = PATCH_SIZE
     LR_CROP_SIZE: int = PATCH_SIZE // SCALE
@@ -49,8 +49,9 @@ class SuperResConfig:
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     NUM_WORKERS: int = 4 if sys.platform == "darwin" else 8 # os.cpu_count() or 4
-    BATCH_SIZE: int = 8 if sys.platform == "darwin" else 16
+    BATCH_SIZE: int = 16 if sys.platform == "darwin" else 32
     CHECKPOINT_INTERVAL: int = 1 # in epochs
+    SAMPLE_INTERVAL: int = CHECKPOINT_INTERVAL # when to log images to wandb
     PRETRAIN_EPOCHS: int = 10
 
     # --- Diffusion Specific ---
@@ -59,9 +60,12 @@ class SuperResConfig:
     DIFFUSION_TIMESTEPS: int = 1000
     DIFFUSION_TIME_EMB_DIM: int = 128  # Increased from 24 for better performance
     DIFFUSION_FEATURES: list = field(default_factory=lambda: [64, 128, 256])  # Balanced size
-    # Note: DDPM always uses full training timesteps (e.g., 1000 steps)
-    # DDIM can use fewer steps (e.g., 50 steps) for faster inference
+    DIFFUSION_MODEL_TYPE: str = 'default' 
+    # 'default': features = [32, 64, 128], time_emb_dim = 64 
+    # 'custom': features = DIFFUSION_FEATURES, time_emb_dim = DIFFUSION_TIME_EMB_DIM
     DIFFUSION_SCHEDULER_TYPE: str = "ddim"  # "ddpm" or "ddim"
+    # 'ddpm': always uses full training timesteps (e.g., 1000 steps)
+    # 'ddim': can use fewer steps (e.g., 50 steps) for faster inference
     DIFFUSION_SCHEDULE: str = "cosine"  # "cosine" or "linear"
     DIFFUSION_DDIM_STEPS: int = 50  # Number of inference steps (much faster than 1000)
     DIFFUSION_DDIM_ETA: float = 0.0  # 0.0 = deterministic, 1.0 = stochastic like DDPM
