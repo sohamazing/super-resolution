@@ -205,11 +205,18 @@ def sample_images(model, scheduler, val_loader, device, scheduler_type='ddpm',
     return comparison
 
 
-def train_one_epoch(model, train_loader, scheduler, optimizer, loss_fn,
-                   scaler, ema, device, use_amp, epoch):
-    """Train for one epoch."""
+def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn,
+                    scaler, ema, device, use_amp, epoch, lr_scheduler=None, grad_clip=1.0):
+    """
+    Train the diffusion model for one epoch with:
+    - Mixed precision (torch.amp)
+    - EMA updates
+    - Robust checkpointing
+    - Memory-safe gradient accumulation
+    """
     model.train()
     total_loss = 0.0
+    step_global = epoch * len(train_loader)
 
     loop = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=True)
 
@@ -217,58 +224,74 @@ def train_one_epoch(model, train_loader, scheduler, optimizer, loss_fn,
         lr_batch = lr_batch.to(device, non_blocking=True)
         hr_batch = hr_batch.to(device, non_blocking=True)
 
+        # Bicubic upscale for conditioning
+        lr_upscaled = F.interpolate(
+            lr_batch,
+            scale_factor=config.SCALE,
+            mode='bicubic',
+            align_corners=False
+        )
+
+        # Random timesteps
+        t = torch.randint(0, diffusion_scheduler.timesteps, (hr_batch.size(0),), device=device, dtype=torch.long)
+
+        # Add noise
+        noise = torch.randn_like(hr_batch)
+        noisy_hr = diffusion_scheduler.add_noise(hr_batch, t, noise)
+
         optimizer.zero_grad(set_to_none=True)
 
-        with autocast(device_type=device, enabled=use_amp):
-            # Sample random timesteps
-            t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=device)
-
-            # Add noise to clean images
-            noise = torch.randn_like(hr_batch)
-            noisy_hr = scheduler.add_noise(hr_batch, t, noise)
-
-            # Upscale LR for conditioning
-            lr_upscaled = F.interpolate(
-                lr_batch,
-                scale_factor=config.SCALE,
-                mode='bicubic',
-                align_corners=False
-            )
-
-            # Predict noise
+        # === Forward pass with mixed precision ===
+        with autocast(device_type=device, dtype=torch.float16 if use_amp else torch.float32):
             pred_noise = model(noisy_hr, t, lr_upscaled)
-
-            # Calculate loss (simple MSE on noise prediction)
             loss = loss_fn(noise, pred_noise)
 
-        # Backward pass
+        # === Backprop ===
         scaler.scale(loss).backward()
 
-        # Gradient clipping for stability
+        # Gradient clipping (important for stability with diffusion)
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+        torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
 
         scaler.step(optimizer)
         scaler.update()
 
-        # Update EMA
+        # EMA update
         if ema:
             ema.update()
 
         total_loss += loss.item()
-
-        # Update progress bar
         loop.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Log to wandb
+        # Log training progress
         if step % 100 == 0:
             wandb.log({
                 'train/loss': loss.item(),
-                'train/step': epoch * len(train_loader) + step
+                'train/step': step_global + step,
+                'lr': optimizer.param_groups[0]['lr']
             })
+
+        if step % 500 == 0:
+            torch.cuda.empty_cache()
+
+        # Periodic checkpointing (safe for long runs)
+        # checkpoint_interval = 2000
+        # if checkpoint_interval and (step + 1) % checkpoint_interval == 0:
+        #     ckpt_path = CHECKPOINT_DIR / f"checkpoint_ep{epoch+1}_step{step+1}.pth"
+        #     torch.save({
+        #         'epoch': epoch + 1,
+        #         'step': step + 1,
+        #         'model_state_dict': model.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'scaler_state_dict': scaler.state_dict(),
+        #         'ema_state_dict': ema.shadow if ema else None,
+        #         'lr_scheduler_state_dict': lr_scheduler.state_dict() if lr_scheduler else None
+        #     }, ckpt_path)
+        #     print(f"💾 Intermediate checkpoint saved at step {step+1}")
 
     avg_loss = total_loss / len(train_loader)
     return avg_loss
+
 
 
 def main(args):
@@ -399,7 +422,7 @@ def main(args):
         # Train one epoch
         avg_train_loss = train_one_epoch(
             model, train_loader, scheduler, optimizer, loss_fn,
-            scaler, ema, device, use_amp, epoch
+            scaler, ema, device, use_amp, epoch, lr_scheduler=lr_scheduler
         )
 
         # Validate

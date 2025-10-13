@@ -249,7 +249,7 @@ class DiffusionUNet(nn.Module):
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
                 if self.grad_ckpt:
-                    x = checkpoint.checkpoint(layer, x, time_emb)
+                    x = checkpoint.checkpoint(layer, x, time_emb, use_reentrant=False)
                 else:
                     x = layer(x, time_emb)
             else:
@@ -257,8 +257,8 @@ class DiffusionUNet(nn.Module):
 
         # Decoder
         if self.grad_ckpt:
-            x = checkpoint.checkpoint(self.up1, x, skip2, time_emb)
-            x = checkpoint.checkpoint(self.up2, x, skip1, time_emb)
+            x = checkpoint.checkpoint(self.up1, x, skip2, time_emb, use_reentrant=False)
+            x = checkpoint.checkpoint(self.up2, x, skip1, time_emb, use_reentrant=False)
         else:
             x = self.up1(x, skip2, time_emb)
             x = self.up2(x, skip1, time_emb)
