@@ -3,6 +3,8 @@
 Training script for Conditional Diffusion Super-Resolution Model.
 Clean, modular, and production-ready with proper checkpointing and logging.
 """
+import os
+import sys
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
@@ -13,7 +15,7 @@ from pathlib import Path
 from tqdm import tqdm
 import wandb
 import argparse
-import sys
+import psutil
 
 # Setup paths
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -293,7 +295,77 @@ def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn
     avg_loss = total_loss / len(train_loader)
     return avg_loss
 
+def print_training_summary(model, scheduler, config, device, use_amp, num_train_samples):
+    """Prints a structured summary of the model, config, and environment."""
+    
+    # Check if a model method exists to get architecture details
+    model_arch_summary = "No architecture summary available."
+    try:
+        # This part was good, but the result was never used.
+        # Let's use it now!
+        if hasattr(model, 'get_architecture_summary'):
+            model_arch_summary = model.get_architecture_summary()
+        elif hasattr(model, '__repr__'):
+            model_arch_summary = str(model)
+    except Exception as e:
+        model_arch_summary = f"Error retrieving architecture summary: {e}"
 
+    summary = []
+    summary.append("=" * 80)
+    summary.append(f"{'TRAINING SUMMARY':^80}")
+    summary.append("=" * 80)
+
+    # 1. Environment and Device
+    summary.append(f"1. ENVIRONMENT & DEVICE:")
+    summary.append(f"  Device: {str(device).upper()}")
+    summary.append(f"  Mixed Precision (AMP): {'Enabled' if use_amp else 'Disabled'}")
+    
+    try:
+        if device == 'cuda':
+            total_memory = torch.cuda.get_device_properties(device).total_memory / (1024**3)
+            summary.append(f"  GPU VRAM (Total): {total_memory:.2f} GiB")
+        elif device == 'mps':
+            total_memory = psutil.virtual_memory().total / (1024**3)
+            summary.append(f"  Unified Memory (Total): {total_memory:.2f} GiB (Apple Silicon)")
+    except ImportError:
+        summary.append("  (Install `psutil` for memory summary: pip install psutil)")
+    except Exception as e:
+        summary.append(f"  Could not retrieve memory info: {e}")
+
+    summary.append(f"  vCPUs (Workers): {config.NUM_WORKERS} / {os.cpu_count() or 4}")
+    summary.append("-" * 80)
+    
+    # 2. Model & Data
+    summary.append(f"2. MODEL & DATA CONFIG:")
+    summary.append(f"  Model Parameters: {model.get_num_params():,}")
+    # CORRECTED LINE: Use the passed-in num_train_samples
+    summary.append(f"  Training Samples: {num_train_samples:,}")
+    summary.append(f"  Patch Size (HR): {config.HR_CROP_SIZE}x{config.HR_CROP_SIZE}")
+    summary.append(f"  Batch Size (Train): {config.BATCH_SIZE}")
+    summary.append(f"  Learning Rate: {config.DIFFUSION_LR:.2e}")
+    summary.append(f"  LR Scheduler: CosineAnnealingLR (T_max={config.DIFFUSION_EPOCHS})")
+    # A slightly better way to check for EMA
+    summary.append(f"  EMA Enabled: {'Yes' if 'ema' in globals() and ema is not None else 'No'}")
+    summary.append(f"  Grad Checkpoint: {config.DIFFUSION_GRAD_CHECKPOINT}")
+    summary.append("-" * 80)
+
+    # 3. Diffusion Schedule
+    summary.append(f"3. DIFFUSION SCHEDULE:")
+    summary.append(f"  Training Timesteps: {config.DIFFUSION_TIMESTEPS}")
+    summary.append(f"  Beta Schedule: {config.DIFFUSION_SCHEDULE.capitalize()}")
+    summary.append(f"  Sampling Method: {config.DIFFUSION_SCHEDULER_TYPE.upper()}")
+    if config.DIFFUSION_SCHEDULER_TYPE == 'ddim':
+        summary.append(f"  DDIM Inference Steps: {config.DIFFUSION_DDIM_STEPS}")
+        summary.append(f"  DDIM Eta: {config.DIFFUSION_DDIM_ETA}")
+    summary.append("-" * 80)
+
+    # 4. MODEL ARCHITECTURE (Best Practice) - ADDED
+    summary.append("4. MODEL ARCHITECTURE:")
+    summary.append(model_arch_summary)
+    summary.append("=" * 80)
+    
+    # Print the full summary
+    print("\n".join(summary))
 
 def main(args):
     # Initialize wandb
@@ -410,10 +482,15 @@ def main(args):
             if ema and 'ema_state_dict' in checkpoint:
                 ema.shadow = checkpoint['ema_state_dict']
 
-            print(f"✅ Resumed from epoch {start_epoch}")
+            print(f"   Resumed from epoch {start_epoch}")
             print(f"   Best validation loss: {best_val_loss:.6f}")
         else:
             print("No checkpoint found, starting from scratch")
+
+    # Print Overview
+    print(f"Training samples: {len(train_dataset)}")
+    print(f"Validation samples: {len(val_dataset)}")
+    print_training_summary(model, scheduler, config, device, use_amp, len(train_dataset))
 
     # Training loop
     print("\n" + "="*60)
@@ -479,11 +556,11 @@ def main(args):
                 best_val_loss = val_metrics['val_loss']
                 checkpoint['best_val_loss'] = best_val_loss
                 torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-                print(f"  🌟 New best model saved! Loss: {best_val_loss:.6f}")
+                print(f" New best model saved! Loss: {best_val_loss:.6f}")
 
             # Generate sample images
             if (epoch + 1) % 10 == 0:
-                print("  📸 Generating sample images...")
+                print(" Generating sample images...")
                 if ema:
                     ema.apply_shadow()
 

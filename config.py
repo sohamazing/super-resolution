@@ -35,7 +35,7 @@ class SuperResConfig:
 
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
-    NUM_WORKERS: int = 0 if sys.platform == "darwin" else os.cpu_count() or 4
+    NUM_WORKERS: int = 4 if sys.platform == "darwin" else 8 # os.cpu_count() or 4
     BATCH_SIZE: int = 8 if sys.platform == "darwin" else 16
     CHECKPOINT_INTERVAL: int = 1 # in epochs
     PRETRAIN_EPOCHS: int = 10
