@@ -175,9 +175,9 @@ class DiffusionUNet(nn.Module):
     - Skip connections for preserving spatial information
     """
     def __init__(self, in_channels=6, out_channels=3, features=[64, 128, 256],
-                 time_emb_dim=128, dropout=0.1):
+                 time_emb_dim=128, dropout=0.1, grad_ckpt=False):
         super().__init__()
-        self.grad_ckpt = config.DIFFUSION_GRAD_CHECKPOINT
+        self.grad_ckpt = grad_ckpt
 
         # Time embedding network
         self.time_mlp = nn.Sequential(

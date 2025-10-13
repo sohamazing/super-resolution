@@ -348,7 +348,8 @@ def main(args):
         out_channels=3,
         features=config.DIFFUSION_FEATURES,
         time_emb_dim=config.DIFFUSION_TIME_EMB_DIM,
-        dropout=0.1
+        dropout=0.1,
+        grad_ckpt=config.DIFFUSION_GRAD_CHECKPOINT
     ).to(device)
 
     print(f"Model parameters: {model.get_num_params():,}")
