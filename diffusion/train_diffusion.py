@@ -19,7 +19,7 @@ import sys
 SCRIPT_DIR = Path(__file__).parent.absolute()
 sys.path.append(str(SCRIPT_DIR.parent))
 
-from diffusion.diffusion_model import DiffusionUNet # or import DiffusionUNetLite as DiffusionUNet
+from diffusion.diffusion_model import DiffusionUNetLite as DiffusionUNet # import DiffusionUNet # larger
 from diffusion.scheduler import create_scheduler, DDPMScheduler, DDIMScheduler
 from utils.datasets import TrainDataset, ValDataset
 from config import config

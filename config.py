@@ -52,6 +52,7 @@ class SuperResConfig:
     DIFFUSION_SCHEDULE: str = "cosine"  # "cosine" or "linear"
     DIFFUSION_DDIM_STEPS: int = 50  # Number of inference steps (much faster than 1000)
     DIFFUSION_DDIM_ETA: float = 0.0  # 0.0 = deterministic, 1.0 = stochastic like DDPM
+    DIFFUSION_GRAD_CHECKPOINT: bool = False # Saves VRAM/GPU memory but slower.
 
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 1000
