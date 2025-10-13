@@ -177,7 +177,7 @@ class DiffusionUNet(nn.Module):
     def __init__(self, in_channels=6, out_channels=3, features=[64, 128, 256],
                  time_emb_dim=128, dropout=0.1):
         super().__init__()
-        self.grad_ckpt = True
+        self.grad_ckpt = config.DIFFUSION_GRAD_CHECKPOINT
 
         # Time embedding network
         self.time_mlp = nn.Sequential(
@@ -278,3 +278,4 @@ class DiffusionUNetLite(DiffusionUNet):
         kwargs.setdefault('features', [32, 64, 128])
         kwargs.setdefault('time_emb_dim', 64)
         super().__init__(**kwargs)
+        self.grad_ckpt = False
