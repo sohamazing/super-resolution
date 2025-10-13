@@ -46,17 +46,12 @@ class SuperResConfig:
     DIFFUSION_TIMESTEPS: int = 1000
     DIFFUSION_TIME_EMB_DIM: int = 128  # Increased from 24 for better performance
     DIFFUSION_FEATURES: list = field(default_factory=lambda: [64, 128, 256])  # Balanced size
-    
-    # --- Diffusion Scheduler Configuration ---
-    DIFFUSION_SCHEDULER_TYPE: str = "ddim"  # "ddpm" or "ddim"
-    DIFFUSION_SCHEDULE: str = "cosine"  # "cosine" or "linear"
-    
-    # --- DDIM Specific Parameters ---
-    DIFFUSION_DDIM_STEPS: int = 50  # Number of inference steps (much faster than 1000)
-    DIFFUSION_DDIM_ETA: float = 0.0  # 0.0 = deterministic, 1.0 = stochastic like DDPM
-    
     # Note: DDPM always uses full training timesteps (e.g., 1000 steps)
     # DDIM can use fewer steps (e.g., 50 steps) for faster inference
+    DIFFUSION_SCHEDULER_TYPE: str = "ddim"  # "ddpm" or "ddim"
+    DIFFUSION_SCHEDULE: str = "cosine"  # "cosine" or "linear"
+    DIFFUSION_DDIM_STEPS: int = 50  # Number of inference steps (much faster than 1000)
+    DIFFUSION_DDIM_ETA: float = 0.0  # 0.0 = deterministic, 1.0 = stochastic like DDPM
 
     # --- ESRGAN Specific ---
     ESRGAN_EPOCHS: int = 1000

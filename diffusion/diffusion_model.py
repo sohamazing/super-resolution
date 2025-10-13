@@ -149,10 +149,10 @@ class DownBlock(nn.Module):
 
 class UpBlock(nn.Module):
     """Upsampling block with skip connections."""
-    def __init__(self, in_channels, out_channels, time_emb_dim, has_attn=False):
+    def __init__(self, in_channels, skip_channels, out_channels, time_emb_dim, has_attn=False):
         super().__init__()
         self.upsample = nn.ConvTranspose2d(in_channels, in_channels, 4, stride=2, padding=1)
-        self.res = ResidualBlock(in_channels + out_channels, out_channels, time_emb_dim)
+        self.res = ResidualBlock(in_channels + skip_channels, out_channels, time_emb_dim)
         self.attn = AttentionBlock(out_channels) if has_attn else nn.Identity()
 
     def forward(self, x, skip, time_emb):
@@ -200,8 +200,8 @@ class DiffusionUNet(nn.Module):
         ])
 
         # Decoder (upsampling path)
-        self.up1 = UpBlock(features[2], features[1], time_emb_dim, has_attn=False)
-        self.up2 = UpBlock(features[1], features[0], time_emb_dim, has_attn=False)
+        self.up1 = UpBlock(features[2], features[2], features[1], time_emb_dim, has_attn=False)
+        self.up2 = UpBlock(features[1], features[1], features[0], time_emb_dim, has_attn=False)
 
         # Final output
         self.final = nn.Sequential(
