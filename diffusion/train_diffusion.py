@@ -301,8 +301,6 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     # Check if a model method exists to get architecture details
     model_arch_summary = "No architecture summary available."
     try:
-        # This part was good, but the result was never used.
-        # Let's use it now!
         if hasattr(model, 'get_architecture_summary'):
             model_arch_summary = model.get_architecture_summary()
         elif hasattr(model, '__repr__'):
@@ -338,13 +336,11 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     # 2. Model & Data
     summary.append(f"2. MODEL & DATA CONFIG:")
     summary.append(f"  Model Parameters: {model.get_num_params():,}")
-    # CORRECTED LINE: Use the passed-in num_train_samples
     summary.append(f"  Training Samples: {num_train_samples:,}")
     summary.append(f"  Patch Size (HR): {config.HR_CROP_SIZE}x{config.HR_CROP_SIZE}")
     summary.append(f"  Batch Size (Train): {config.BATCH_SIZE}")
     summary.append(f"  Learning Rate: {config.DIFFUSION_LR:.2e}")
     summary.append(f"  LR Scheduler: CosineAnnealingLR (T_max={config.DIFFUSION_EPOCHS})")
-    # A slightly better way to check for EMA
     summary.append(f"  EMA Enabled: {'Yes' if 'ema' in globals() and ema is not None else 'No'}")
     summary.append(f"  Grad Checkpoint: {config.DIFFUSION_GRAD_CHECKPOINT}")
     summary.append("-" * 80)
@@ -359,7 +355,7 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
         summary.append(f"  DDIM Eta: {config.DIFFUSION_DDIM_ETA}")
     summary.append("-" * 80)
 
-    # 4. MODEL ARCHITECTURE (Best Practice) - ADDED
+    # 4. MODEL ARCHITECTURE
     summary.append("4. MODEL ARCHITECTURE:")
     summary.append(model_arch_summary)
     summary.append("=" * 80)
@@ -383,14 +379,13 @@ def main(args):
     print(f"Using device: {device}")
     print(f"Mixed precision: {use_amp}")
 
-
+    # Select the train and val dataset dirs
     train_hr_dir = config.DATA_DIR / "train" / "HR"
     train_lr_dir = config.DATA_DIR / "train" / "LR"
     val_hr_dir = config.DATA_DIR / "val" / "HR"
     val_lr_dir = config.DATA_DIR / "val" / "LR"
 
-    # Data loaders
-    # Select the training dataset class and its arguments
+    # Select the training dataset class
     TrainData = TrainDatasetAugmented if config.AUGMENT_FACTOR > 1 else TrainDataset
     kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
     if config.AUGMENT_FACTOR > 1:
@@ -401,6 +396,7 @@ def main(args):
     ValData = ValDatasetGrid if config.VAL_GRID_MODE else ValDataset
     val_dataset = ValData(hr_dir=val_hr_dir, lr_dir=val_lr_dir)
 
+    # Data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.BATCH_SIZE,
@@ -410,7 +406,6 @@ def main(args):
         persistent_workers=(config.NUM_WORKERS > 0),
         prefetch_factor=2 if config.NUM_WORKERS > 0 else None
     )
-
     val_loader = DataLoader(
         val_dataset,
         batch_size=4,
