@@ -325,7 +325,7 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     summary.append(f"  Batch Size (Train): {config.BATCH_SIZE}")
     summary.append(f"  Learning Rate: {config.DIFFUSION_LR:.2e}")
     summary.append(f"  LR Scheduler: CosineAnnealingLR (T_max={config.DIFFUSION_EPOCHS})")
-    summary.append(f"  EMA Enabled: {ema is not None}")
+    summary.append(f"  EMA Enabled: {'Yes' if 'ema' in globals() and ema is not None else 'No'}")
     summary.append(f"  Grad Checkpoint: {config.DIFFUSION_GRAD_CHECKPOINT}")
     summary.append("-" * 80)
 
