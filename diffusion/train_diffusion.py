@@ -27,7 +27,6 @@ from config import config
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
 CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
 
-
 class EMA:
     """Exponential Moving Average for model weights."""
     def __init__(self, model, decay=0.9999):

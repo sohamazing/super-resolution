@@ -6,6 +6,7 @@ Clean, modular implementation with proper normalization and residual connections
 import torch
 from torch import nn
 import torch.nn.functional as F
+import torch.utils.checkpoint as checkpoint
 import math
 
 class SinusoidalTimeEmbedding(nn.Module):
