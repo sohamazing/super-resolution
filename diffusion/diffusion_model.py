@@ -176,6 +176,7 @@ class DiffusionUNet(nn.Module):
     def __init__(self, in_channels=6, out_channels=3, features=[64, 128, 256],
                  time_emb_dim=128, dropout=0.1):
         super().__init__()
+        self.grad_ckpt = True
 
         # Time embedding network
         self.time_mlp = nn.Sequential(
@@ -246,13 +247,20 @@ class DiffusionUNet(nn.Module):
         # Bottleneck
         for layer in self.bottleneck:
             if isinstance(layer, ResidualBlock):
-                x = layer(x, time_emb)
+                if self.grad_ckpt:
+                    x = checkpoint.checkpoint(layer, x, time_emb)
+                else:
+                    x = layer(x, time_emb)
             else:
                 x = layer(x)
 
         # Decoder
-        x = self.up1(x, skip2, time_emb)
-        x = self.up2(x, skip1, time_emb)
+        if self.grad_ckpt:
+            x = checkpoint.checkpoint(self.up1, x, skip2, time_emb)
+            x = checkpoint.checkpoint(self.up2, x, skip1, time_emb)
+        else:
+            x = self.up1(x, skip2, time_emb)
+            x = self.up2(x, skip1, time_emb)
 
         # Final prediction
         return self.final(x)
