@@ -24,7 +24,7 @@ sys.path.append(str(SCRIPT_DIR.parent))
 from diffusion.diffusion_model import DiffusionUNetLite as DiffusionUNet # smaller
 # from diffusion.diffusion_model import DiffusionUNet # larger
 from diffusion.scheduler import create_scheduler, DDPMScheduler, DDIMScheduler
-from utils.datasets import TrainDataset, ValDataset
+from utils.datasets import TrainDataset, TrainDatasetAugmented, ValDataset, ValDatasetGrid
 from config import config
 
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
@@ -383,15 +383,23 @@ def main(args):
     print(f"Using device: {device}")
     print(f"Mixed precision: {use_amp}")
 
+
+    train_hr_dir = config.DATA_DIR / "train" / "HR"
+    train_lr_dir = config.DATA_DIR / "train" / "LR"
+    val_hr_dir = config.DATA_DIR / "val" / "HR"
+    val_lr_dir = config.DATA_DIR / "val" / "LR"
+
     # Data loaders
-    train_dataset = TrainDataset(
-        hr_dir=config.DATA_DIR / "train" / "HR",
-        lr_dir=config.DATA_DIR / "train" / "LR"
-    )
-    val_dataset = ValDataset(
-        hr_dir=config.DATA_DIR / "val" / "HR",
-        lr_dir=config.DATA_DIR / "val" / "LR"
-    )
+    # Select the training dataset class and its arguments
+    TrainData = TrainDatasetAugmented if config.AUGMENT_FACTOR > 1 else TrainDataset
+    kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
+    if config.AUGMENT_FACTOR > 1:
+        train_kwargs["multiplier"] = config.AUGMENT_FACTOR
+    train_dataset = TrainData(**train_kwargs)
+
+    # Select the validation dataset class
+    ValData = ValDatasetGrid if config.VAL_GRID_MODE else ValDataset
+    val_dataset = ValData(hr_dir=val_hr_dir, lr_dir=val_lr_dir)
 
     train_loader = DataLoader(
         train_dataset,

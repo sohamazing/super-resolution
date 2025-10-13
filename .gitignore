@@ -3,8 +3,8 @@
 # ==================================
 # Ignore all data directories
 data/
-div2K-flickr2K-data/
-data_mount/
+div2K-data/
+flickr2k-div2k-data/
 results/
 
 # ==================================

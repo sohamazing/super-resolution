@@ -14,20 +14,33 @@ class SuperResConfig:
 
     # --- Device and Data Paths ---
     TRAIN_VAL_SOURCES: list = field(default_factory=lambda: [
-        Path.home() / "Desktop" / "Photos" / "Flickr2K" / "Flickr2K_HR",
         Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_train_HR",
     ])
     TEST_SOURCES: list = field(default_factory=lambda: [
         Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_valid_HR"
     ])
-    DATA_DIR: Path = Path("div2K-flickr2K-data") # relative local path
-    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/data") # absolute path
+    DATA_DIR: Path = Path("div2k-data") # relative local path
+
+    # # for both divk2k and flicker2k datasets in training
+    # TRAIN_VAL_SOURCES: list = field(default_factory=lambda: [
+    #     Path.home() / "Desktop" / "Photos" / "Flickr2K" / "Flickr2K_HR",
+    #     Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_train_HR",
+    # ])
+    # TEST_SOURCES: list = field(default_factory=lambda: [
+    #     Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_valid_HR"
+    # ])
+    # DATA_DIR: Path = Path("flickr2k-div2k-data") # relative local path
+
+    # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2k-flickr2k-data") # absolute path
     # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/data") # for external drive
     SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
     VAL_SPLIT: float = 0.1
+    TEST_SPLIT: float = 0.1 # FALLBACK: if TEST_SOURCES is None/error. create test set from TRAIN_VAL_SOURCES 
+    AUGMENT_FACTOR: int = 64 # 1 for 1 random crop per train image
+    VAL_GRID_MODE: bool = True # # False for 1 center crop per val image 
 
     # --- Data Processing Parameters ---
-    PATCH_SIZE: int = 256
+    PATCH_SIZE: int = 128
     STEP: int = 128
     SCALE: int = 4
     HR_CROP_SIZE: int = PATCH_SIZE
