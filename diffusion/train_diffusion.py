@@ -353,7 +353,7 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     summary.append("-" * 80)
 
     # 4. MODEL ARCHITECTURE
-    if config.DISPLAY_MODEL_ARCG
+    if config.DISPLAY_MODEL_ARCH:
         summary.append("4. MODEL ARCHITECTURE:")
         summary.append(model_arch_summary)
         summary.append("=" * 80)
