@@ -390,7 +390,7 @@ def main(args):
     train_kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
     TrainData = TrainDatasetAugmented if config.TRAIN_AUGMENT_FACTOR > 1 else TrainDataset
     if config.TRAIN_AUGMENT_FACTOR > 1:
-        train_kwargs["multiplier"] = config.TRAIN_AUGMENT_FACTOR
+        train_kwargs["augment_factor"] = config.TRAIN_AUGMENT_FACTOR
 
     # Select the validation dataset class (ValData)
     val_kwargs = {"hr_dir": val_hr_dir, "lr_dir": val_lr_dir}

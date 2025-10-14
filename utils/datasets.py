@@ -114,24 +114,24 @@ class TrainDataset(SuperResDataset):
 
 class TrainDatasetAugmented(TrainDataset):
     """
-    Virtually augments the dataset by a multiplier factor.
-    For each original image, it provides 'multiplier' number of unique random crops per epoch.
+    Virtually augments the dataset by a augment_factor factor.
+    For each original image, it provides 'augment_factor' number of unique random crops per epoch.
     """
-    def __init__(self, hr_dir: str, lr_dir: str, multiplier: int = 64):
+    def __init__(self, hr_dir: str, lr_dir: str, augment_factor: int = 64):
         super().__init__(hr_dir, lr_dir)
-        self.multiplier = multiplier
-        print(f"Dataset augmented by factor of {multiplier}. Original size: {len(self.pairs)}, New size: {self.__len__()}")
+        self.augment_factor = augment_factor
+        print(f"Dataset augmented by factor of {augment_factor}. Original size: {len(self.pairs)}, New size: {self.__len__()}")
 
     def __len__(self):
         # Return the "multiplied" length of the dataset
-        return len(self.pairs) * self.multiplier
+        return len(self.pairs) * self.augment_factor
 
     def __getitem__(self, index: int):
         # Use the new index to find the original image's index
-        # For example, with a multiplier of 64:
+        # For example, with a augment_factor of 64:
         # indices 0-63 will map to original_index 0
         # indices 64-127 will map to original_index 1
-        original_index = index // self.multiplier
+        original_index = index // self.augment_factor
         
         # Now, call the parent class's __getitem__ method with the original index.
         # Because it's called separately for each of the 64 indices,
@@ -221,16 +221,16 @@ class ValDatasetCenterGrid(SuperResDataset):
     """
     Generates a deterministic, CENTERED grid of patches from full-size images.
     Focuses validation on the most feature-rich central area of the image,
-    avoiding edges. The number of patches is controlled by the multiplier.
+    avoiding edges. The number of patches is controlled by the augment_factor.
     """
-    def __init__(self, hr_dir: str, lr_dir: str, multiplier: int = 4):
+    def __init__(self, hr_dir: str, lr_dir: str, augment_factor: int = 4):
         super().__init__(hr_dir, lr_dir)
         self.patch_size_hr = config.HR_CROP_SIZE
 
-        # --- Validate the multiplier ---
-        sqrt_factor = math.sqrt(multiplier)
+        # --- Validate the augment_factor ---
+        sqrt_factor = math.sqrt(augment_factor)
         if sqrt_factor != int(sqrt_factor):
-            raise ValueError(f"multiplier must be a perfect square (e.g., 1, 4, 9, 16), but got {multiplier}")
+            raise ValueError(f"augment_factor must be a perfect square (e.g., 1, 4, 9, 16), but got {augment_factor}")
         self.grid_side = int(sqrt_factor)
 
         self.patch_map = []
