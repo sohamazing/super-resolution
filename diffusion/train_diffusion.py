@@ -68,15 +68,14 @@ class EMA:
 @torch.no_grad()
 def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
     """
-    Validate the model on the validation set.
+    Validate the model's noise prediction performance on the validation set.
+    This is the core training objective.
     """
     model.eval()
     total_loss = 0.0
-    total_bicubic_mse = 0.0
-    total_model_mse = 0.0
     num_batches = 0
 
-    for lr_batch, hr_batch in tqdm(val_loader, desc="Validating", leave=False):
+    for lr_batch, hr_batch in tqdm(val_loader, desc="Validating (Noise Loss)", leave=False):
         lr_batch = lr_batch.to(device)
         hr_batch = hr_batch.to(device)
 
@@ -99,68 +98,30 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
             # Predict noise
             pred_noise = model(noisy_hr, t, lr_upscaled)
 
-            # 1. Extract necessary alpha values for timestep t
-            # NOTE: Assumes sqrt_alphas_cumprod and sqrt_one_minus_alphas_cumprod are defined on scheduler
-            sqrt_alphas_cumprod_t = scheduler._extract(scheduler.sqrt_alphas_cumprod, t, hr_batch.shape)
-            sqrt_one_minus_alphas_cumprod_t = scheduler._extract(scheduler.sqrt_one_minus_alphas_cumprod, t, hr_batch.shape)
-
-            # 2. DDPM formula to estimate x_0 (predicted clean image):
-            # x_0 = (x_t - sqrt(1 - alpha_cumprod) * pred_noise) / sqrt(alpha_cumprod)
-            pred_x0 = (noisy_hr - sqrt_one_minus_alphas_cumprod_t * pred_noise) / sqrt_alphas_cumprod_t
-
-            # 3. Clip predicted x_0 for stability (important for diffusion models)
-            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
-
-            print(f"\n--- DEBUG TENSORS at t={t[0].item()} ---")
-            print(f"noisy_hr max: {noisy_hr.abs().max().item():.4f}")
-            print(f"pred_noise max: {pred_noise.abs().max().item():.4f}")
-            print(f"sqrt_alpha_t (min/max): {sqrt_alphas_cumprod_t.min().item():.4f} / {sqrt_alphas_cumprod_t.max().item():.4f}")
-            print(f"pred_x0 max (after clamp): {pred_x0.abs().max().item():.4f}")
-            print(f"hr_batch max: {hr_batch.abs().max().item():.4f}")
-            print(f"--- END DEBUG BLOCK ---")
-
             # Calculate the training loss (MSE on noise)
-            loss = loss_fn(noise, pred_noise)
-
-            # Calculate the Bicubic baseline MSE
-            bicubic_mse = F.mse_loss(lr_upscaled, hr_batch)
-
-            # Calculate the TRUE Reconstruction MSE (Model vs. Ground Truth)
-            reconstruction_mse = F.mse_loss(pred_x0, hr_batch)
-
+            loss = loss_fn(pred_noise, noise)
             total_loss += loss.item()
-            total_bicubic_mse += bicubic_mse.item()
-            total_model_mse += reconstruction_mse.item() # Now tracks Reconstruction MSE
             num_batches += 1
 
     model.train()
-
     avg_loss = total_loss / num_batches
-    avg_bicubic_mse = total_bicubic_mse / num_batches
-    avg_model_mse = total_model_mse / num_batches # True Model Reconstruction MSE
-
-    # Calculate improvement: should now be positive if the model is better than Bicubic
-    improvement = ((avg_bicubic_mse - avg_model_mse) / avg_bicubic_mse) * 100
-
-    return {
-        'val_loss': avg_loss,          # Noise Prediction Loss
-        'bicubic_mse': avg_bicubic_mse,
-        'model_mse': avg_model_mse,    # TRUE Reconstruction MSE
-        'improvement_pct': improvement
-    }
+    return {'val_noise_loss': avg_loss}
 
 @torch.no_grad()
-def sample_images(model, scheduler, val_loader_samples, device, scheduler_type='ddpm',
-                 num_inference_steps=None, ddim_eta=0.0):
-    """Generate SR images using the full denoising process."""
+def sample_and_evaluate(model, scheduler, val_loader_samples, device,
+                        num_inference_steps=None, ddim_eta=0.0):
+    """
+    Generate SR images using the full denoising process and evaluate their quality
+    against the ground truth and a bicubic baseline.
+    """
     model.eval()
 
-    # Get one batch
+    # Get one batch for sampling
     lr_batch, hr_batch = next(iter(val_loader_samples))
     lr_batch = lr_batch.to(device)
     hr_batch = hr_batch.to(device)
 
-    # Upscale LR for conditioning
+    # Upscale LR for conditioning and as a baseline
     lr_upscaled = F.interpolate(
         lr_batch,
         scale_factor=config.SCALE,
@@ -168,137 +129,113 @@ def sample_images(model, scheduler, val_loader_samples, device, scheduler_type='
         align_corners=False
     )
 
-    # Start from pure noise
+    # Start the denoising process from pure noise
     img = torch.randn_like(hr_batch)
 
-    # Determine sampling method
+    # --- Full Denoising Loop (DDIM or DDPM) ---
     is_ddim = isinstance(scheduler, DDIMScheduler)
-
     if is_ddim:
-        # DDIM: Can use fewer steps
         if num_inference_steps is None:
             num_inference_steps = config.DIFFUSION_DDIM_STEPS
         timesteps = scheduler.get_sampling_timesteps(num_inference_steps)
-
-        # DDIM sampling loop
-        for i, t_idx in enumerate(tqdm(timesteps, desc=f"DDIM ({num_inference_steps} steps)", leave=False)):
-            t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
-
-            # Get previous timestep
-            if i < len(timesteps) - 1:
-                t_prev = torch.full((img.shape[0],), timesteps[i+1], device=device, dtype=torch.long)
-            else:
-                t_prev = torch.full((img.shape[0],), -1, device=device, dtype=torch.long)
-
-            # Predict and denoise
-            pred_noise = model(img, t, lr_upscaled)
-            img = scheduler.sample_prev_timestep(img, t, t_prev, pred_noise, eta=ddim_eta)
-
+        desc = f"DDIM Sampling ({num_inference_steps} steps)"
     else:
-        # DDPM: Must use all training steps
         timesteps = list(range(0, scheduler.timesteps))[::-1]
+        desc = f"DDPM Sampling ({len(timesteps)} steps)"
 
-        # DDPM sampling loop
-        for t_idx in tqdm(timesteps, desc=f"DDPM ({len(timesteps)} steps)", leave=False):
-            t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
+    for i, t_idx in enumerate(tqdm(timesteps, desc=desc, leave=False)):
+        t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
+        pred_noise = model(img, t, lr_upscaled)
 
-            # Predict and denoise
-            pred_noise = model(img, t, lr_upscaled)
+        if is_ddim:
+            t_prev = torch.full((img.shape[0],), timesteps[i+1], device=device, dtype=torch.long) if i < len(timesteps) - 1 else torch.full((img.shape[0],), -1, device=device, dtype=torch.long)
+            img = scheduler.sample_prev_timestep(img, t, t_prev, pred_noise, eta=ddim_eta)
+        else:
             img = scheduler.sample_prev_timestep(img, t, pred_noise)
+    # --- End of Loop ---
 
+    # --- Calculate Meaningful Metrics ---
+    bicubic_mse = F.mse_loss(lr_upscaled, hr_batch)
+    model_mse = F.mse_loss(img, hr_batch)
+    improvement = ((bicubic_mse.item() - model_mse.item()) / bicubic_mse.item()) * 100 if bicubic_mse.item() > 0 else 0.0
+
+    # --- Create Visualization Grid ---
+    # Denormalize all images from [-1, 1] to [0, 1] for visualization
+    lr_upscaled_vis = denormalize(lr_upscaled)
+    img_vis = denormalize(img)
+    hr_batch_vis = denormalize(hr_batch)
+    comparison_grid = torch.cat([lr_upscaled_vis, img_vis, hr_batch_vis], dim=0)
+    
     model.train()
 
-    # Create comparison grid: [LR_upscaled | Model_SR | GT_HR]
-    comparison = torch.cat([lr_upscaled, img, hr_batch], dim=0)
-    return comparison
+    return {
+        'comparison_grid': comparison_grid,
+        'bicubic_mse': bicubic_mse.item(),
+        'model_mse': model_mse.item(),
+        'improvement_pct': improvement
+    }
+
+def denormalize(tensor: torch.Tensor) -> torch.Tensor:
+    """
+    Converts [-1, 1] range tensors back to [0, 1] for visualization or saving.
+    Supports batched tensors too.
+    """
+    return tensor.mul(0.5).add(0.5).clamp(0, 1)
 
 
 def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn,
                     scaler, ema, device, use_amp, epoch, lr_scheduler=None, grad_clip=1.0):
     """
-    Train the diffusion model for one epoch with:
-    - Mixed precision (torch.amp)
-    - EMA updates
-    - Robust checkpointing
-    - Memory-safe gradient accumulation
+    Train the diffusion model for one epoch.
     """
     model.train()
     total_loss = 0.0
     step_global = epoch * len(train_loader)
-
     loop = tqdm(train_loader, desc=f"Epoch {epoch+1}", leave=True)
 
     for step, (lr_batch, hr_batch) in enumerate(loop):
         lr_batch = lr_batch.to(device, non_blocking=True)
         hr_batch = hr_batch.to(device, non_blocking=True)
 
-        # Bicubic upscale for conditioning
-        lr_upscaled = F.interpolate(
-            lr_batch,
-            scale_factor=config.SCALE,
-            mode='bicubic',
-            align_corners=False
-        )
+        with torch.no_grad():
+            lr_upscaled = F.interpolate(
+                lr_batch,
+                scale_factor=config.SCALE,
+                mode='bicubic',
+                align_corners=False
+            )
 
-        # Random timesteps
         t = torch.randint(0, diffusion_scheduler.timesteps, (hr_batch.size(0),), device=device, dtype=torch.long)
-
-        # Add noise
         noise = torch.randn_like(hr_batch)
         noisy_hr = diffusion_scheduler.add_noise(hr_batch, t, noise)
 
         optimizer.zero_grad(set_to_none=True)
 
-        # === Forward pass with mixed precision ===
         with autocast(device_type=device, dtype=torch.float16 if use_amp else torch.float32):
             pred_noise = model(noisy_hr, t, lr_upscaled)
             loss = loss_fn(noise, pred_noise)
 
-        # === Backprop ===
         scaler.scale(loss).backward()
-
-        # Gradient clipping (important for stability with diffusion)
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-
         scaler.step(optimizer)
         scaler.update()
 
-        # EMA update
         if ema:
             ema.update()
 
         total_loss += loss.item()
         loop.set_postfix(loss=f"{loss.item():.4f}")
 
-        # Log training progress
         if step % 100 == 0:
             wandb.log({
                 'train/loss': loss.item(),
                 'train/step': step_global + step,
                 'train/lr': optimizer.param_groups[0]['lr']
             })
+    
+    return total_loss / len(train_loader)
 
-        if step % 500 == 0:
-            torch.cuda.empty_cache()
-
-        # Periodic checkpointing (safe for long runs)
-        # checkpoint_interval = 2000
-        # if checkpoint_interval and (step + 1) % checkpoint_interval == 0:
-        #     ckpt_path = CHECKPOINT_DIR / f"checkpoint_ep{epoch+1}_step{step+1}.pth"
-        #     torch.save({
-        #         'epoch': epoch + 1,
-        #         'step': step + 1,
-        #         'model_state_dict': model.state_dict(),
-        #         'optimizer_state_dict': optimizer.state_dict(),
-        #         'scaler_state_dict': scaler.state_dict(),
-        #         'ema_state_dict': ema.shadow if ema else None,
-        #         'lr_scheduler_state_dict': lr_scheduler.state_dict() if lr_scheduler else None
-        #     }, ckpt_path)
-        #     print(f"Intermediate checkpoint saved at step {step+1}")
-
-    avg_loss = total_loss / len(train_loader)
-    return avg_loss
 
 def print_training_summary(model, scheduler, config, device, use_amp, num_train_samples):
     """Prints a structured summary of the model, config, and environment."""
@@ -370,7 +307,6 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     print("\n".join(summary))
 
 def main(args):
-    # Initialize wandb
     wandb.init(
         project="SuperResolution-Diffusion",
         config=vars(config),
@@ -382,40 +318,31 @@ def main(args):
     if args.model_type:
         config.DIFFUSION_MODEL_TYPE = args.model_type
 
-    # Device setup
     device = config.DEVICE
     use_amp = (device == 'cuda')
     print(f"Using device: {device}")
     print(f"Mixed precision: {use_amp}")
 
-    # Select the train and val dataset dirs
     train_hr_dir = config.DATA_DIR / "train" / "HR"
     train_lr_dir = config.DATA_DIR / "train" / "LR"
     val_hr_dir = config.DATA_DIR / "val" / "HR"
     val_lr_dir = config.DATA_DIR / "val" / "LR"
 
-    # Select the training dataset class in (TrainData)
     train_kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
     TrainData = TrainDatasetAugmented if config.TRAIN_AUGMENT_FACTOR > 1 else TrainDataset
     if config.TRAIN_AUGMENT_FACTOR > 1:
         train_kwargs["augment_factor"] = config.TRAIN_AUGMENT_FACTOR
 
-    # Select the validation dataset class (ValData)
     val_kwargs = {"hr_dir": val_hr_dir, "lr_dir": val_lr_dir}
+    ValData = ValDatasetGrid if config.VAL_GRID_MODE else ValDataset
     if config.VAL_GRID_MODE:
         if config.VAL_SAMPLE_CENTER:
             ValData = ValDatasetCenterGrid
             val_kwargs["augment_factor"] = config.VAL_AUGMENT_FACTOR
-        else:
-            ValData = ValDatasetGrid
-    else:
-        ValData = ValDataset
 
-    # Data Loaders
     train_dataset = TrainData(**train_kwargs)
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=config.BATCH_SIZE,
+    train_loader = DataLoader(train_dataset, 
+        batch_size=config.BATCH_SIZE, 
         shuffle=True,
         num_workers=config.NUM_WORKERS,
         pin_memory=(device == "cuda"),
@@ -423,270 +350,146 @@ def main(args):
         prefetch_factor=2 if config.NUM_WORKERS > 0 else None
     )
 
-    val_dataset = ValData(**val_kwargs) # many patches per image
-    val_loader = DataLoader(
-        val_dataset,
+    val_dataset = ValData(**val_kwargs)
+    val_loader = DataLoader(val_dataset, 
         batch_size=config.BATCH_SIZE,
         shuffle=False,
-        num_workers=2,
+        num_workers=config.NUM_WORKERS,
         pin_memory=(device == "cuda")
     )
-    val_dataset_samples = ValDataset(hr_dir=val_hr_dir, lr_dir=val_lr_dir) # 1 patch per image
-    val_loader_samples = DataLoader(
-        val_dataset_samples,
-        batch_size=4,   # Get 4 unique images as requested. 
-        shuffle=False,   # Shuffle to see different images each time you sample
+    
+    val_dataset_samples = ValDataset(hr_dir=val_hr_dir, lr_dir=val_lr_dir)
+    val_loader_samples = DataLoader(val_dataset_samples, 
+        batch_size=4,
+        shuffle=True,
         num_workers=2,
-        pin_memory=(device == "cuda")
+        pin_memory=(device=="cuda")
     )
 
-    # Initialize model
-    model_type = getattr(config, "DIFFUSION_MODEL_TYPE", None)
-
-    # 2. Build the correct model with proper kwargs
+    model_type = getattr(config, "DIFFUSION_MODEL_TYPE", "default")
     if model_type == "custom":
         model = DiffusionUNet(
-            in_channels=6,  # (3 noisy + 3 LR conditional)
-            out_channels=3,
+            in_channels=6, out_channels=3, 
             features=config.DIFFUSION_FEATURES,
-            time_emb_dim=config.DIFFUSION_TIME_EMB_DIM,
+            time_emb_dim=config.DIFFUSION_TIME_EMB_DIM, 
             dropout=0.1,
             grad_ckpt=config.DIFFUSION_GRAD_CHECKPOINT
         )
-    elif model_type == "default":
-        model = DiffusionUNetLite(
-            in_channels=6,
-            out_channels=3
-        )
     else:
-        raise ValueError(f"Unknown DIFFUSION_MODEL_TYPE '{model_type}'. Valid options: ['custom', 'default'].")
+        model = DiffusionUNetLite(in_channels=6, out_channels=3)
 
     model = model.to(device)
-    total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"-- Model type --: {model_type}")
-    print(f"Model parameters: {total_params:,}")
-    wandb.config.update({
-        "model_type": model_type,
-        "model_parameters": total_params
-    }, allow_val_change=True)
+    print(f"Model parameters: {model.get_num_params():,}")
+    wandb.config.update({"model_type": model_type, "model_parameters": model.get_num_params()}, allow_val_change=True)
 
-    print(f"Model get_num_params: {model.get_num_params():,}")
-
-    # Initialize scheduler based on config
     scheduler = create_scheduler(
         scheduler_type=config.DIFFUSION_SCHEDULER_TYPE,
         timesteps=config.DIFFUSION_TIMESTEPS,
         schedule=config.DIFFUSION_SCHEDULE,
         device=device
     )
-
     print(f"-- Scheduler --: {scheduler}")
-    print(f"Sampling method: {config.DIFFUSION_SCHEDULER_TYPE.upper()}")
-    if config.DIFFUSION_SCHEDULER_TYPE == 'ddim':
-        print(f"DDIM inference steps: {config.DIFFUSION_DDIM_STEPS}")
-        print(f"DDIM eta: {config.DIFFUSION_DDIM_ETA}")
 
-    # Initialize EMA
     ema = EMA(model, decay=0.9999) if args.use_ema else None
-    if ema:
-        print("EMA enabled")
+    if ema: print("EMA enabled")
 
-    # Optimizer and scheduler
-    optimizer = optim.AdamW(
-        model.parameters(),
-        lr=config.DIFFUSION_LR,
-        betas=(0.9, 0.999),
-        weight_decay=1e-4
-    )
-
-    lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer,
-        T_max=config.DIFFUSION_EPOCHS,
-        eta_min=1e-7
-    )
-
-    # Loss function and scaler
-    loss_fn = nn.MSELoss()  # L2 loss on noise prediction
+    optimizer = optim.AdamW(model.parameters(), lr=config.DIFFUSION_LR, betas=(0.9, 0.999), weight_decay=1e-4)
+    lr_scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=config.DIFFUSION_EPOCHS, eta_min=1e-7)
+    loss_fn = nn.MSELoss()
     scaler = GradScaler(enabled=use_amp)
 
-    # Resume from checkpoint
     start_epoch = 0
     best_val_loss = float('inf')
-
     if args.resume:
         checkpoint_path = CHECKPOINT_DIR / "checkpoint_latest.pth"
         if checkpoint_path.exists():
             print(f"Loading checkpoint from {checkpoint_path}")
             checkpoint = torch.load(checkpoint_path, map_location=device)
-
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-            if 'scheduler_state_dict' in checkpoint:
-                lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-            else:
-                print("No scheduler state found in checkpoint. Reinitializing scheduler.")
-
-            if ema and 'ema_state_dict' in checkpoint:
-                ema.shadow = checkpoint['ema_state_dict']
-            else:
-                print("No EMA state found in checkpoint.")
-
+            if 'scheduler_state_dict' in checkpoint: lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+            if ema and 'ema_state_dict' in checkpoint: ema.shadow = checkpoint['ema_state_dict']
             start_epoch = checkpoint['epoch']
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
-            print(f"   Resumed from epoch {start_epoch}")
-            print(f"   Best validation loss: {best_val_loss:.6f}")
-        else:
-            print("No checkpoint found, starting from scratch")
+            print(f"   Resumed from epoch {start_epoch}, Best val loss: {best_val_loss:.6f}")
 
-    # Print Overview
-    num_train_patches = len(train_dataset)
-    num_val_patches = len(val_dataset)
-    total_patches = num_train_patches + num_val_patches
-    train_ratio = num_train_patches / total_patches
-    val_ratio = num_val_patches / total_patches
+    print_training_summary(model, scheduler, config, device, use_amp, len(train_dataset))
 
-    print_training_summary(model, scheduler, config, device, use_amp, num_train_patches)
-
-    print(f"\n{'='*80}")
-    print(f"DATASET PATCH SPLIT SUMMARY")
-    print(f"{'-'*80}")
-    print(f"  Training patches (random crops):     {num_train_patches:,}")
-    print(f"  Validation patches (deterministic):  {num_val_patches:,}")
-    print(f"  Ratio (train : val):                 {train_ratio:.2f} : {val_ratio:.2f}")
-    print(f"{'='*80}\n")
-
-    # Training loop
-    print("\n" + "="*60)
-    print("Starting Diffusion Model Training")
-    print("="*60 + "\n")
+    print("\n" + "="*60 + "\nStarting Diffusion Model Training\n" + "="*60 + "\n")
 
     for epoch in range(start_epoch, config.DIFFUSION_EPOCHS):
-        # Train one epoch
         avg_train_loss = train_one_epoch(
             model, train_loader, scheduler, optimizer, loss_fn,
             scaler, ema, device, use_amp, epoch, lr_scheduler=lr_scheduler
         )
 
-        # Validate
-        if (epoch + 1) % config.CHECKPOINT_INTERVAL == 0 or epoch == 0:
-            # Apply EMA weights for validation
-            if ema:
-                ema.apply_shadow()
+        if (epoch + 1) % config.CHECKPOINT_INTERVAL == 0:
+            if ema: ema.apply_shadow()
 
             val_metrics = validate(model, val_loader, scheduler, loss_fn, device, use_amp)
+            
+            # --- Perform full evaluation and sampling on a subset of validation data ---
+            eval_results = sample_and_evaluate(
+                model, scheduler, val_loader_samples, device,
+                num_inference_steps=config.DIFFUSION_DDIM_STEPS
+            )
 
-            # Restore original weights
-            if ema:
-                ema.restore()
+            if ema: ema.restore()
 
-            # Log metrics
-            print(f"\nEpoch {epoch+1}/{config.DIFFUSION_EPOCHS}")
-            print(f"  Train Loss: {avg_train_loss:.6f}")
-            print(f"  Val Loss: {val_metrics['val_loss']:.6f}")
-            print(f"  Bicubic MSE: {val_metrics['bicubic_mse']:.6f}")
-            print(f"  Model MSE: {val_metrics['model_mse']:.6f}")
-            print(f"  Improvement: {val_metrics['improvement_pct']:.2f}%")
-            print(f"  LR: {lr_scheduler.get_last_lr()[0]:.2e}")
+            print(f"\n--- Epoch {epoch+1}/{config.DIFFUSION_EPOCHS} ---")
+            print(f"  Avg Train Loss:       {avg_train_loss:.6f}")
+            print(f"  Val Noise Loss:       {val_metrics['val_noise_loss']:.6f}")
+            print(f"  Bicubic MSE (sample): {eval_results['bicubic_mse']:.6f}")
+            print(f"  Model MSE (sample):   {eval_results['model_mse']:.6f}")
+            print(f"  Improvement %:        {eval_results['improvement_pct']:.2f}%")
+            print(f"  Learning Rate:        {lr_scheduler.get_last_lr()[0]:.2e}")
 
             wandb.log({
-                'val/epoch': epoch + 1,
-                'val/avg_train_loss': avg_train_loss,
-                'val/avg_val_loss': val_metrics['val_loss'],
-                'val/bicubic_mse': val_metrics['bicubic_mse'],
-                'val/model_mse': val_metrics['model_mse'],
-                'val/improvement_pct': val_metrics['improvement_pct'],
-                # 'train/lr': lr_scheduler.get_last_lr()[0]
+                'epoch': epoch + 1,
+                'train/avg_loss': avg_train_loss,
+                'val/noise_loss': val_metrics['val_noise_loss'],
+                'val/bicubic_mse': eval_results['bicubic_mse'],
+                'val/model_mse': eval_results['model_mse'],
+                'val/improvement_pct': eval_results['improvement_pct'],
+                'samples': wandb.Image(
+                    torchvision.utils.make_grid(
+                        eval_results['comparison_grid'],
+                        nrow=eval_results['comparison_grid'].shape[0] // 3
+                    ),
+                    caption=f"Epoch {epoch+1} | [Top: Bicubic, Mid: Model, Btm: Ground Truth]"
+                )
             })
 
-            # Save checkpoint
             checkpoint = {
                 'epoch': epoch + 1,
                 'model_state_dict': model.state_dict(),
                 'optimizer_state_dict': optimizer.state_dict(),
                 'scheduler_state_dict': lr_scheduler.state_dict(),
-                'val_loss': val_metrics['val_loss'],
+                'val_loss': val_metrics['val_noise_loss'],
                 'best_val_loss': best_val_loss
             }
+            if ema: checkpoint['ema_state_dict'] = ema.shadow
 
-            if ema:
-                checkpoint['ema_state_dict'] = ema.shadow
-
-            # Save latest checkpoint
             torch.save(checkpoint, CHECKPOINT_DIR / "checkpoint_latest.pth")
 
-            # Save best model
-            if val_metrics['val_loss'] < best_val_loss:
-                best_val_loss = val_metrics['val_loss']
+            if val_metrics['val_noise_loss'] < best_val_loss:
+                best_val_loss = val_metrics['val_noise_loss']
                 checkpoint['best_val_loss'] = best_val_loss
                 torch.save(checkpoint, CHECKPOINT_DIR / "best_model.pth")
-                print(f" New best model saved! Loss: {best_val_loss:.6f}")
+                print(f"  New best model saved! Val Noise Loss: {best_val_loss:.6f}")
 
-            # Generate sample images
-            if (epoch + 1) % config.SAMPLE_INTERVAL == 0:
-                print(" Generating sample images...")
-                if ema:
-                    ema.apply_shadow()
-
-                sample_grid = sample_images(
-                    model, scheduler, val_loader_samples, device,
-                    num_inference_steps=50  # Faster sampling
-                )
-
-                if ema:
-                    ema.restore()
-
-                grid = torchvision.utils.make_grid(
-                    sample_grid,
-                    nrow=sample_grid.shape[0] // 3,
-                    normalize=True
-                )
-
-                wandb.log({
-                    'samples': wandb.Image(
-                        grid,
-                        caption=f"Epoch {epoch+1} | Val Loss: {val_metrics['val_loss']:.4f}"
-                    )
-                })
-
-        # Step learning rate scheduler
         lr_scheduler.step()
 
-    print("\n" + "="*60)
-    print("Training Complete!")
-    print(f"Best validation loss: {best_val_loss:.6f}")
-    print("="*60 + "\n")
-
+    print("\n" + "="*60 + "\nTraining Complete!\n" + f"Best validation noise loss: {best_val_loss:.6f}\n" + "="*60 + "\n")
     wandb.finish()
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Train Conditional Diffusion Model for Super-Resolution"
-    )
-    parser.add_argument(
-        "--resume",
-        action="store_true",
-        help="Resume training from latest checkpoint"
-    )
-    parser.add_argument(
-        "--wandb_id",
-        type=str,
-        default=None,
-        help="W&B run ID for resuming"
-    )
-    parser.add_argument(
-        "--use_ema",
-        action="store_true",
-        help="Use Exponential Moving Average"
-    )
-    parser.add_argument(
-        "--model_type",
-        type=str,
-        default=None,
-        choices=["default", "custom"],
-        help="Override config to select model type"
-    )
-
-
+    parser = argparse.ArgumentParser(description="Train Conditional Diffusion Model for Super-Resolution")
+    parser.add_argument("--resume", action="store_true", help="Resume training from latest checkpoint")
+    parser.add_argument("--wandb_id", type=str, default=None, help="W&B run ID for resuming")
+    parser.add_argument("--use_ema", action="store_true", help="Use Exponential Moving Average")
+    parser.add_argument("--model_type", type=str, default=None, choices=["default", "custom"], help="Override config to select model type")
     args = parser.parse_args()
     main(args)
