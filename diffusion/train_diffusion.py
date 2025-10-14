@@ -340,9 +340,9 @@ def main(args):
 
     val_kwargs = {"hr_dir": val_hr_dir, "lr_dir": val_lr_dir}
     ValData = ValDatasetGrid if config.VAL_GRID_MODE else ValDataset
-    if config.VAL_GRID_MODE:
+    if config.VAL_GRID_MODE: # uses patch size and step size to make grid ()
         if config.VAL_SAMPLE_CENTER:
-            ValData = ValDatasetCenterGrid
+            ValData = ValDatasetCenterGrid # augment_factor patches from a cenetered grid 
             val_kwargs["augment_factor"] = config.VAL_AUGMENT_FACTOR
 
     train_dataset = TrainData(**train_kwargs)
@@ -358,7 +358,7 @@ def main(args):
     val_dataset = ValData(**val_kwargs)
     val_loader = DataLoader(val_dataset, 
         batch_size=config.BATCH_SIZE,
-        shuffle=True,
+        shuffle=False,
         num_workers=config.NUM_WORKERS,
         pin_memory=(device == "cuda")
     )
