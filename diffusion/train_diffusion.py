@@ -16,7 +16,6 @@ from tqdm import tqdm
 import wandb
 import argparse
 import psutil
-import math
 
 # Setup paths
 SCRIPT_DIR = Path(__file__).parent.absolute()
@@ -83,7 +82,7 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
 
         with autocast(device_type=device, enabled=use_amp):
             # Random timestep for validation
-            t = torch.randint(0, scheduler.timesteps, (hr_batch.shape[0],), device=device)
+            t = torch.randint(1, scheduler.timesteps, (hr_batch.shape[0],), device=device)
 
             # Add noise
             noise = torch.randn_like(hr_batch)
@@ -111,6 +110,14 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
 
             # 3. Clip predicted x_0 for stability (important for diffusion models)
             pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+
+            print(f"\n--- DEBUG TENSORS at t={t[0].item()} ---")
+            print(f"noisy_hr max: {noisy_hr.abs().max().item():.4f}")
+            print(f"pred_noise max: {pred_noise.abs().max().item():.4f}")
+            print(f"sqrt_alpha_t (min/max): {sqrt_alphas_cumprod_t.min().item():.4f} / {sqrt_alphas_cumprod_t.max().item():.4f}")
+            print(f"pred_x0 max (after clamp): {pred_x0.abs().max().item():.4f}")
+            print(f"hr_batch max: {hr_batch.abs().max().item():.4f}")
+            print(f"--- END DEBUG BLOCK ---")
 
             # Calculate the training loss (MSE on noise)
             loss = loss_fn(noise, pred_noise)
