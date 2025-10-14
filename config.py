@@ -47,7 +47,8 @@ class SuperResConfig:
     TEST_SPLIT: float = 0.1 # FALLBACK: if TEST_SOURCES is None/error. create test set from TRAIN_VAL_SOURCES
     TRAIN_AUGMENT_FACTOR: int = 64 # 1 for 1 random crop per train image
     VAL_AUGMENT_FACTOR: int = 4 # must be whole square (1, 4, 9, 16, etc)
-    VAL_GRID_MODE: bool = True # # False for 1 center crop per val image
+    VAL_GRID_MODE: bool = True # False for 1 center crop per val image
+    VAL_SAMPLE_CENTER: bool = True # True for using centered patches for visual validation samples
 
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
