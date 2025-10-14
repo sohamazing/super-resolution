@@ -13,6 +13,8 @@ class SuperResConfig:
     """A single source of truth for all model and training parameters."""
 
     # --- Device and Data Paths ---
+    SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
+
     TRAIN_VAL_SOURCES: list = field(default_factory=lambda: [
         Path.home() / "Desktop" / "Photos" / "Div2K" / "DIV2K_train_HR",
     ])
@@ -33,11 +35,6 @@ class SuperResConfig:
 
     # DATA_DIR: Path = Path("/Users/soham/Documents/super-res/div2k-flickr2k-data") # absolute path
     # DATA_DIR: Path = Path("/Volumes/LaCie/SuperResolution/data") # for external drive
-    SUPPORTED_EXTENSIONS: tuple = (".png", ".jpg", ".jpeg", ".heic", ".heif", ".dng", ".cr2", ".arw")
-    VAL_SPLIT: float = 0.1
-    TEST_SPLIT: float = 0.1 # FALLBACK: if TEST_SOURCES is None/error. create test set from TRAIN_VAL_SOURCES 
-    AUGMENT_FACTOR: int = 64 # 1 for 1 random crop per train image
-    VAL_GRID_MODE: bool = True # # False for 1 center crop per val image 
 
     # --- Data Processing Parameters ---
     PATCH_SIZE: int = 128
@@ -46,6 +43,12 @@ class SuperResConfig:
     HR_CROP_SIZE: int = PATCH_SIZE
     LR_CROP_SIZE: int = PATCH_SIZE // SCALE
 
+    VAL_SPLIT: float = 0.1
+    TEST_SPLIT: float = 0.1 # FALLBACK: if TEST_SOURCES is None/error. create test set from TRAIN_VAL_SOURCES
+    TRAIN_AUGMENT_FACTOR: int = 64 # 1 for 1 random crop per train image
+    VAL_AUGMENT_FACTOR: int = 4 # must be whole square (1, 4, 9, 16, etc)
+    VAL_GRID_MODE: bool = True # # False for 1 center crop per val image
+
     # --- Common Training Parameters ---
     DEVICE: str = "cuda" if torch.cuda.is_available() else "mps" if torch.backends.mps.is_available() else "cpu"
     NUM_WORKERS: int = 4 if sys.platform == "darwin" else 8 # os.cpu_count() or 4
@@ -53,6 +56,7 @@ class SuperResConfig:
     CHECKPOINT_INTERVAL: int = 1 # in epochs
     SAMPLE_INTERVAL: int = CHECKPOINT_INTERVAL # when to log images to wandb
     PRETRAIN_EPOCHS: int = 10
+    DISPLAY_MODEL_ARCH: bool = False # displays model.get_architecture_summary()
 
     # --- Diffusion Specific ---
     DIFFUSION_EPOCHS: int = 100

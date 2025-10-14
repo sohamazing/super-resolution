@@ -24,7 +24,7 @@ sys.path.append(str(SCRIPT_DIR.parent))
 from config import config
 from diffusion.diffusion_model import DiffusionUNet, DiffusionUNetLite
 from diffusion.scheduler import create_scheduler, DDPMScheduler, DDIMScheduler
-from utils.datasets import TrainDataset, TrainDatasetAugmented, ValDataset, ValDatasetGrid
+from utils.datasets import TrainDataset, TrainDatasetAugmented, ValDataset, ValDatasetGrid, ValDatasetCenterGrid
 
 
 CHECKPOINT_DIR = SCRIPT_DIR / "checkpoints"
@@ -69,9 +69,6 @@ class EMA:
 def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
     """
     Validate the model on the validation set.
-
-    Returns:
-        dict: Validation metrics
     """
     model.eval()
     total_loss = 0.0
@@ -102,40 +99,56 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
             # Predict noise
             pred_noise = model(noisy_hr, t, lr_upscaled)
 
-            # Calculate losses
+            # 1. Extract necessary alpha values for timestep t
+            # NOTE: Assumes sqrt_alphas_cumprod and sqrt_one_minus_alphas_cumprod are defined on scheduler
+            sqrt_alphas_cumprod_t = scheduler._extract(scheduler.sqrt_alphas_cumprod, t, hr_batch.shape)
+            sqrt_one_minus_alphas_cumprod_t = scheduler._extract(scheduler.sqrt_one_minus_alphas_cumprod, t, hr_batch.shape)
+
+            # 2. DDPM formula to estimate x_0 (predicted clean image):
+            # x_0 = (x_t - sqrt(1 - alpha_cumprod) * pred_noise) / sqrt(alpha_cumprod)
+            pred_x0 = (noisy_hr - sqrt_one_minus_alphas_cumprod_t * pred_noise) / sqrt_alphas_cumprod_t
+
+            # 3. Clip predicted x_0 for stability (important for diffusion models)
+            pred_x0 = torch.clamp(pred_x0, -1.0, 1.0)
+
+            # Calculate the training loss (MSE on noise)
             loss = loss_fn(noise, pred_noise)
+
+            # Calculate the Bicubic baseline MSE
             bicubic_mse = F.mse_loss(lr_upscaled, hr_batch)
-            model_mse = F.mse_loss(pred_noise, noise)
+
+            # Calculate the TRUE Reconstruction MSE (Model vs. Ground Truth)
+            reconstruction_mse = F.mse_loss(pred_x0, hr_batch)
 
             total_loss += loss.item()
             total_bicubic_mse += bicubic_mse.item()
-            total_model_mse += model_mse.item()
+            total_model_mse += reconstruction_mse.item() # Now tracks Reconstruction MSE
             num_batches += 1
 
     model.train()
 
     avg_loss = total_loss / num_batches
     avg_bicubic_mse = total_bicubic_mse / num_batches
-    avg_model_mse = total_model_mse / num_batches
+    avg_model_mse = total_model_mse / num_batches # True Model Reconstruction MSE
 
-    # Calculate improvement
+    # Calculate improvement: should now be positive if the model is better than Bicubic
     improvement = ((avg_bicubic_mse - avg_model_mse) / avg_bicubic_mse) * 100
 
     return {
-        'val_loss': avg_loss,
+        'val_loss': avg_loss,          # Noise Prediction Loss
         'bicubic_mse': avg_bicubic_mse,
-        'model_mse': avg_model_mse,
+        'model_mse': avg_model_mse,    # TRUE Reconstruction MSE
         'improvement_pct': improvement
     }
 
 @torch.no_grad()
-def sample_images(model, scheduler, val_loader, device, scheduler_type='ddpm',
+def sample_images(model, scheduler, val_loader_samples, device, scheduler_type='ddpm',
                  num_inference_steps=None, ddim_eta=0.0):
     """Generate SR images using the full denoising process."""
     model.eval()
 
     # Get one batch
-    lr_batch, hr_batch = next(iter(val_loader))
+    lr_batch, hr_batch = next(iter(val_loader_samples))
     lr_batch = lr_batch.to(device)
     hr_batch = hr_batch.to(device)
 
@@ -340,9 +353,10 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     summary.append("-" * 80)
 
     # 4. MODEL ARCHITECTURE
-    summary.append("4. MODEL ARCHITECTURE:")
-    summary.append(model_arch_summary)
-    summary.append("=" * 80)
+    if config.DISPLAY_MODEL_ARCG
+        summary.append("4. MODEL ARCHITECTURE:")
+        summary.append(model_arch_summary)
+        summary.append("=" * 80)
     
     # Print the full summary
     print("\n".join(summary))
@@ -372,18 +386,25 @@ def main(args):
     val_hr_dir = config.DATA_DIR / "val" / "HR"
     val_lr_dir = config.DATA_DIR / "val" / "LR"
 
-    # Select the training dataset class
-    TrainData = TrainDatasetAugmented if config.AUGMENT_FACTOR > 1 else TrainDataset
+    # Select the training dataset class in (TrainData)
     train_kwargs = {"hr_dir": train_hr_dir, "lr_dir": train_lr_dir}
-    if config.AUGMENT_FACTOR > 1:
-        train_kwargs["multiplier"] = config.AUGMENT_FACTOR
+    TrainData = TrainDatasetAugmented if config.TRAIN_AUGMENT_FACTOR > 1 else TrainDataset
+    if config.TRAIN_AUGMENT_FACTOR > 1:
+        train_kwargs["multiplier"] = config.TRAIN_AUGMENT_FACTOR
+
+    # Select the validation dataset class (ValData)
+    val_kwargs = {"hr_dir": val_hr_dir, "lr_dir": val_lr_dir}
+    if config.VAL_GRID_MODE:
+        if config.VAL_CENTERED_GRID:
+            ValData = ValDatasetCenterGrid
+            val_kwargs["augment_factor"] = config.VAL_AUGMENT_FACTOR
+        else:
+            ValData = ValDatasetGrid
+    else:
+        ValData = ValDataset
+
+    # Data Loaders
     train_dataset = TrainData(**train_kwargs)
-
-    # Select the validation dataset class
-    ValData = ValDatasetGrid if config.VAL_GRID_MODE else ValDataset
-    val_dataset = ValData(hr_dir=val_hr_dir, lr_dir=val_lr_dir)
-
-    # Data loaders
     train_loader = DataLoader(
         train_dataset,
         batch_size=config.BATCH_SIZE,
@@ -393,10 +414,20 @@ def main(args):
         persistent_workers=(config.NUM_WORKERS > 0),
         prefetch_factor=2 if config.NUM_WORKERS > 0 else None
     )
+
+    val_dataset = ValData(**val_kwargs) # many patches per image
     val_loader = DataLoader(
         val_dataset,
-        batch_size=4,
+        batch_size=config.BATCH_SIZE,
         shuffle=False,
+        num_workers=2,
+        pin_memory=(device == "cuda")
+    )
+    val_dataset_samples = ValDataset(hr_dir=val_hr_dir, lr_dir=val_lr_dir) # 1 patch per image
+    val_loader_samples = DataLoader(
+        val_dataset_samples,
+        batch_size=4,   # Get 4 unique images as requested. 
+        shuffle=False,   # Shuffle to see different images each time you sample
         num_workers=2,
         pin_memory=(device == "cuda")
     )
@@ -550,7 +581,7 @@ def main(args):
             print(f"  LR: {lr_scheduler.get_last_lr()[0]:.2e}")
 
             wandb.log({
-                'epoch': epoch + 1,
+                'val/epoch': epoch + 1,
                 'val/avg_train_loss': avg_train_loss,
                 'val/avg_val_loss': val_metrics['val_loss'],
                 'val/bicubic_mse': val_metrics['bicubic_mse'],
@@ -589,7 +620,7 @@ def main(args):
                     ema.apply_shadow()
 
                 sample_grid = sample_images(
-                    model, scheduler, val_loader, device,
+                    model, scheduler, val_loader_samples, device,
                     num_inference_steps=50  # Faster sampling
                 )
 

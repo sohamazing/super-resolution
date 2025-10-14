@@ -216,3 +216,74 @@ class ValDatasetGrid(SuperResDataset):
         lr_tensor = self.normalize(self.to_tensor(lr_image))
 
         return lr_tensor, hr_tensor
+
+class ValDatasetCenterGrid(SuperResDataset):
+    """
+    Generates a deterministic, CENTERED grid of patches from full-size images.
+    Focuses validation on the most feature-rich central area of the image,
+    avoiding edges. The number of patches is controlled by the multiplier.
+    """
+    def __init__(self, hr_dir: str, lr_dir: str, multiplier: int = 4):
+        super().__init__(hr_dir, lr_dir)
+        self.patch_size_hr = config.HR_CROP_SIZE
+
+        # --- Validate the multiplier ---
+        sqrt_factor = math.sqrt(multiplier)
+        if sqrt_factor != int(sqrt_factor):
+            raise ValueError(f"multiplier must be a perfect square (e.g., 1, 4, 9, 16), but got {multiplier}")
+        self.grid_side = int(sqrt_factor)
+
+        self.patch_map = []
+        print("Pre-calculating CENTERED validation grid patches...")
+        skipped_images = 0
+
+        for img_index, (lr_path, hr_path) in enumerate(self.pairs):
+            with Image.open(hr_path) as hr_image:
+                w, h = hr_image.size
+
+            # --- Centering Logic ---
+            grid_total_size = self.grid_side * self.patch_size_hr
+
+            # 1. Check if the image is large enough for the entire grid
+            if grid_total_size > w or grid_total_size > h:
+                skipped_images += 1
+                continue
+
+            # 2. Calculate the top-left offset for the WHOLE grid
+            offset_j = (w - grid_total_size) // 2
+            offset_i = (h - grid_total_size) // 2
+
+            # 3. Generate patch coordinates relative to the grid offset
+            for row in range(self.grid_side):
+                for col in range(self.grid_side):
+                    patch_i = offset_i + (row * self.patch_size_hr)
+                    patch_j = offset_j + (col * self.patch_size_hr)
+                    self.patch_map.append((img_index, patch_i, patch_j))
+
+        if skipped_images > 0:
+            print(f"  Warning: Skipped {skipped_images} images that were too small for the requested {self.grid_side}x{self.grid_side} grid.")
+        print(f"Validation set: {len(self.pairs) - skipped_images} valid images, {len(self.patch_map)} total centered grid patches.")
+
+    def __len__(self):
+        return len(self.patch_map)
+
+    def __getitem__(self, index: int):
+        # This part is identical to ValDatasetGrid, it just uses the new patch_map
+        img_index, i, j = self.patch_map[index]
+
+        lr_path, hr_path = self.pairs[img_index]
+        hr_image = Image.open(hr_path).convert("RGB")
+        lr_image = Image.open(lr_path).convert("RGB")
+
+        h, w = self.patch_size_hr, self.patch_size_hr
+        hr_image = TF.crop(hr_image, i, j, h, w)
+
+        lr_i, lr_j = i // self.scale_factor, j // self.scale_factor
+        lr_h, lr_w = h // self.scale_factor, w // self.scale_factor
+        lr_image = TF.crop(lr_image, lr_i, lr_j, lr_h, lr_w)
+
+        hr_tensor = self.normalize(self.to_tensor(hr_image))
+        lr_tensor = self.normalize(self.to_tensor(lr_image))
+
+        return lr_tensor, hr_tensor
+
