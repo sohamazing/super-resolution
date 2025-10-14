@@ -107,8 +107,9 @@ def validate(model, val_loader, scheduler, loss_fn, device, use_amp):
     avg_loss = total_loss / num_batches
     return {'val_noise_loss': avg_loss}
 
+
 @torch.no_grad()
-def sample_and_evaluate(model, scheduler, val_loader_samples, device,
+def sample_and_evaluate(model, scheduler, val_loader_samples, device, use_amp,
                         num_inference_steps=None, ddim_eta=0.0):
     """
     Generate SR images using the full denoising process and evaluate their quality
@@ -143,24 +144,26 @@ def sample_and_evaluate(model, scheduler, val_loader_samples, device,
         timesteps = list(range(0, scheduler.timesteps))[::-1]
         desc = f"DDPM Sampling ({len(timesteps)} steps)"
 
-    for i, t_idx in enumerate(tqdm(timesteps, desc=desc, leave=False)):
-        t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
-        pred_noise = model(img, t, lr_upscaled)
+    # Wrap the loop in autocast for mixed precision inference
+    with autocast(device_type=device, enabled=use_amp):
+        for i, t_idx in enumerate(tqdm(timesteps, desc=desc, leave=False)):
+            t = torch.full((img.shape[0],), t_idx, device=device, dtype=torch.long)
+            pred_noise = model(img, t, lr_upscaled)
 
-        if is_ddim:
-            t_prev = torch.full((img.shape[0],), timesteps[i+1], device=device, dtype=torch.long) if i < len(timesteps) - 1 else torch.full((img.shape[0],), -1, device=device, dtype=torch.long)
-            img = scheduler.sample_prev_timestep(img, t, t_prev, pred_noise, eta=ddim_eta)
-        else:
-            img = scheduler.sample_prev_timestep(img, t, pred_noise)
+            if is_ddim:
+                t_prev = torch.full((img.shape[0],), timesteps[i+1], device=device, dtype=torch.long) if i < len(timesteps) - 1 else torch.full((img.shape[0],), -1, device=device, dtype=torch.long)
+                img = scheduler.sample_prev_timestep(img, t, t_prev, pred_noise, eta=ddim_eta)
+            else:
+                img = scheduler.sample_prev_timestep(img, t, pred_noise)
     # --- End of Loop ---
 
     # --- Calculate Meaningful Metrics ---
-    bicubic_mse = F.mse_loss(lr_upscaled, hr_batch)
-    model_mse = F.mse_loss(img, hr_batch)
+    # Ensure metrics are calculated in float32 for precision
+    bicubic_mse = F.mse_loss(lr_upscaled.float(), hr_batch.float())
+    model_mse = F.mse_loss(img.float(), hr_batch.float())
     improvement = ((bicubic_mse.item() - model_mse.item()) / bicubic_mse.item()) * 100 if bicubic_mse.item() > 0 else 0.0
 
     # --- Create Visualization Grid ---
-    # Denormalize all images from [-1, 1] to [0, 1] for visualization
     lr_upscaled_vis = denormalize(lr_upscaled)
     img_vis = denormalize(img)
     hr_batch_vis = denormalize(hr_batch)
@@ -174,6 +177,7 @@ def sample_and_evaluate(model, scheduler, val_loader_samples, device,
         'model_mse': model_mse.item(),
         'improvement_pct': improvement
     }
+
 
 def denormalize(tensor: torch.Tensor) -> torch.Tensor:
     """
@@ -431,7 +435,7 @@ def main(args):
             
             # --- Perform full evaluation and sampling on a subset of validation data ---
             eval_results = sample_and_evaluate(
-                model, scheduler, val_loader_samples, device,
+                model, scheduler, val_loader_samples, device, use_amp,
                 num_inference_steps=config.DIFFUSION_DDIM_STEPS
             )
 
