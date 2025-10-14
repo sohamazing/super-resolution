@@ -452,12 +452,12 @@ def main(args):
 
             wandb.log({
                 'epoch': epoch + 1,
-                'train/avg_loss': avg_train_loss,
-                'val/noise_loss': val_metrics['val_noise_loss'],
-                'val/bicubic_mse': eval_results['bicubic_mse'],
-                'val/model_mse': eval_results['model_mse'],
-                'val/improvement_pct': eval_results['improvement_pct'],
-                'samples': wandb.Image(
+                'val/avg_train_loss': avg_train_loss,
+                'val/avg_val_loss': val_metrics['val_noise_loss'],
+                'visual/bicubic_mse': eval_results['bicubic_mse'],
+                'visual/model_mse': eval_results['model_mse'],
+                'visual/improvement_pct': eval_results['improvement_pct'],
+                'visual/samples': wandb.Image(
                     torchvision.utils.make_grid(
                         eval_results['comparison_grid'],
                         nrow=eval_results['comparison_grid'].shape[0] // 3
