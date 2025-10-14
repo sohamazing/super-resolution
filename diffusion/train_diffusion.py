@@ -395,7 +395,7 @@ def main(args):
     # Select the validation dataset class (ValData)
     val_kwargs = {"hr_dir": val_hr_dir, "lr_dir": val_lr_dir}
     if config.VAL_GRID_MODE:
-        if config.VAL_CENTERED_GRID:
+        if config.VAL_SAMPLE_CENTER:
             ValData = ValDatasetCenterGrid
             val_kwargs["augment_factor"] = config.VAL_AUGMENT_FACTOR
         else:
