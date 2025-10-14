@@ -241,7 +241,7 @@ def train_one_epoch(model, train_loader, diffusion_scheduler, optimizer, loss_fn
     return total_loss / len(train_loader)
 
 
-def print_training_summary(model, scheduler, config, device, use_amp, num_train_samples):
+def print_training_summary(model, scheduler, config, device, use_amp, num_train_samples, num_val_samples):
     """Prints a structured summary of the model, config, and environment."""
     
     # Check if a model method exists to get architecture details
@@ -282,8 +282,9 @@ def print_training_summary(model, scheduler, config, device, use_amp, num_train_
     # 2. Model & Data
     summary.append(f"2. MODEL & DATA CONFIG:")
     summary.append(f"  Model Parameters: {model.get_num_params():,}")
-    summary.append(f"  Training Samples: {num_train_samples:,}")
     summary.append(f"  Patch Size (HR): {config.HR_CROP_SIZE}x{config.HR_CROP_SIZE}")
+    summary.append(f"  Training Samples: {num_train_samples:,}")
+    summary.append(f"  Validation Samples: {num_val_samples:,}")
     summary.append(f"  Batch Size (Train): {config.BATCH_SIZE}")
     summary.append(f"  Learning Rate: {config.DIFFUSION_LR:.2e}")
     summary.append(f"  LR Scheduler: CosineAnnealingLR (T_max={config.DIFFUSION_EPOCHS})")
@@ -357,7 +358,7 @@ def main(args):
     val_dataset = ValData(**val_kwargs)
     val_loader = DataLoader(val_dataset, 
         batch_size=config.BATCH_SIZE,
-        shuffle=False,
+        shuffle=True,
         num_workers=config.NUM_WORKERS,
         pin_memory=(device == "cuda")
     )
@@ -365,7 +366,7 @@ def main(args):
     val_dataset_samples = ValDataset(hr_dir=val_hr_dir, lr_dir=val_lr_dir)
     val_loader_samples = DataLoader(val_dataset_samples, 
         batch_size=4,
-        shuffle=True,
+        shuffle=False,
         num_workers=2,
         pin_memory=(device=="cuda")
     )
@@ -418,7 +419,7 @@ def main(args):
             best_val_loss = checkpoint.get('best_val_loss', float('inf'))
             print(f"   Resumed from epoch {start_epoch}, Best val loss: {best_val_loss:.6f}")
 
-    print_training_summary(model, scheduler, config, device, use_amp, len(train_dataset))
+    print_training_summary(model, scheduler, config, device, use_amp, len(train_dataset), len(val_dataset))
 
     print("\n" + "="*60 + "\nStarting Diffusion Model Training\n" + "="*60 + "\n")
 
