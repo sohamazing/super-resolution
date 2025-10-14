@@ -223,6 +223,12 @@ class DiffusionUNet(nn.Module):
                 if module.bias is not None:
                     nn.init.zeros_(module.bias)
 
+        final_conv = self.final[-1]  # Last Conv2d in the sequential
+        nn.init.zeros_(final_conv.weight)
+        if final_conv.bias is not None:
+            nn.init.zeros_(final_conv.bias)
+        print("✓ Applied zero-initialization to final diffusion output layer")
+
     def forward(self, x, t, lr_condition):
         """
         Args:
