@@ -16,6 +16,7 @@ from tqdm import tqdm
 import wandb
 import argparse
 import psutil
+import math
 
 # Setup paths
 SCRIPT_DIR = Path(__file__).parent.absolute()
